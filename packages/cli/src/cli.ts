@@ -164,24 +164,104 @@ program
     );
   });
 
-// --- mwoc auth add ---
-program
+// --- mwoc auth ---
+const authCmd = program
   .command("auth")
-  .description("Manage credentials")
-  .addCommand(
-    new Command("add")
-      .description("Add or rotate a credential for a provider")
-      .argument("<provider>", "Provider name (e.g. anthropic, openai)")
-      .action(async (provider: string) => {
-        const key = await password({ message: `API key for ${provider}:` });
-        const auth = loadAuth();
-        auth[provider] = { ...auth[provider], apiKey: key.trim() };
-        saveAuth(auth);
-        console.log(
-          chalk.green(`✓ Saved API key for ${provider} to ${AUTH_FILE}`)
-        );
-      })
-  );
+  .description("Manage credentials");
+
+authCmd.addCommand(
+  new Command("add")
+    .description("Add or rotate a credential for a provider")
+    .argument("<provider>", "Provider name (e.g. anthropic, openai)")
+    .action(async (provider: string) => {
+      const key = await password({ message: `API key for ${provider}:` });
+      const auth = loadAuth();
+      auth[provider] = { ...auth[provider], apiKey: key.trim() };
+      saveAuth(auth);
+      console.log(chalk.green(`✓ Saved API key for ${provider} to ${AUTH_FILE}`));
+    })
+);
+
+authCmd.addCommand(
+  new Command("remove")
+    .description("Remove a stored credential for a provider")
+    .argument("<provider>", "Provider name (e.g. anthropic, openai)")
+    .action((provider: string) => {
+      const auth = loadAuth();
+      if (!auth[provider]) {
+        console.log(chalk.yellow(`No credential found for "${provider}".`));
+        return;
+      }
+      delete auth[provider];
+      saveAuth(auth);
+      console.log(chalk.green(`✓ Removed credential for "${provider}"`));
+    })
+);
+
+authCmd.addCommand(
+  new Command("list")
+    .description("List providers that have a stored credential")
+    .action(() => {
+      const auth = loadAuth();
+      const providers = Object.keys(auth);
+      if (providers.length === 0) {
+        console.log(chalk.dim("No credentials stored. Run: mwoc auth add <provider>"));
+        return;
+      }
+      for (const p of providers) {
+        const key = auth[p]?.apiKey;
+        const display = key ? `${key.slice(0, 8)}${"•".repeat(12)}` : "(no key)";
+        console.log(`  ${p.padEnd(16)} ${chalk.dim(display)}`);
+      }
+    })
+);
+
+// --- mwoc resource ---
+const resourceCmd = program
+  .command("resource")
+  .description("Manage declared resources");
+
+resourceCmd.addCommand(
+  new Command("list")
+    .description("List all declared resources from resources.yaml")
+    .action(() => {
+      const config = loadResourcesConfig();
+      if (config.resources.length === 0) {
+        console.log(chalk.dim("No resources declared. Run: mwoc init"));
+        return;
+      }
+      for (const r of config.resources) {
+        const detail =
+          r.type === "local"
+            ? r.endpoint
+            : r.type === "server"
+              ? r.endpoint
+              : r.type === "cloud" && r.webOnly
+                ? `${r.provider} (web only)`
+                : r.provider;
+        console.log(`  ${r.name.padEnd(24)} ${chalk.dim(r.type.padEnd(8))} ${chalk.dim(detail)}`);
+      }
+    })
+);
+
+resourceCmd.addCommand(
+  new Command("remove")
+    .description("Remove a declared resource by name")
+    .argument("<name>", "Resource name as shown in `mwoc resource list`")
+    .action((name: string) => {
+      const config = loadResourcesConfig();
+      const before = config.resources.length;
+      config.resources = config.resources.filter((r) => r.name !== name);
+      if (config.resources.length === before) {
+        console.log(chalk.yellow(`No resource named "${name}" found.`));
+        console.log(chalk.dim("Run `mwoc resource list` to see declared resource names."));
+        return;
+      }
+      saveResourcesConfig(config);
+      console.log(chalk.green(`✓ Removed resource "${name}" from ${RESOURCES_FILE}`));
+      console.log(chalk.dim("If this resource had an API key, also run: mwoc auth remove <provider>"));
+    })
+);
 
 // --- mwoc init ---
 program
