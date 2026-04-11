@@ -6,6 +6,8 @@ import {
   probeAll,
   fetchModelEvals,
   fetchOllamaModelInfo,
+  listBenchRuns,
+  loadBenchRun,
 } from "@mwoc/core";
 import type { StateCache } from "@mwoc/core";
 
@@ -295,6 +297,16 @@ function buildHtml(port: number): string {
       border-radius: 3px;
       font-family: inherit;
     }
+    .bench-metric { }
+    .bench-toks { font-size: 20px; font-weight: 700; color: var(--text); }
+    .bench-toks-label { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+    .bench-meta { font-size: 11px; color: var(--text-dim); margin-top: 8px; }
+    .bench-mem { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+    .bench-history { width: 100%; font-size: 11px; border-collapse: collapse; margin-top: 10px; }
+    .bench-history td { padding: 3px 0; }
+    .bench-history td:last-child { text-align: right; color: var(--text); }
+    .bench-history td:first-child { color: var(--text-dim); }
+    .bench-history td:nth-child(2) { color: var(--text-dim); padding: 0 8px; }
     .skeleton {
       height: 11px;
       background: linear-gradient(90deg, var(--surface) 25%, var(--surface2) 50%, var(--surface) 75%);
@@ -642,10 +654,50 @@ function buildHtml(port: number): string {
       }
       capsHtml += '</div>';
 
-      // ── Performance section (stub) ──
-      const perfHtml = '<div class="detail-section"><div class="detail-section-title">Performance</div>'
-        + '<div class="bench-stub">No benchmark data.&nbsp; Run <code>mwoc bench</code> to measure token throughput and latency.</div>'
-        + '</div>';
+      // ── Performance section ──
+      let perfHtml = '<div class="detail-section"><div class="detail-section-title">Performance</div>';
+      const bench = cache.bench;
+      if (!bench) {
+        perfHtml += '<div class="detail-empty">Loading…</div>';
+      } else if (bench.error) {
+        perfHtml += '<div class="detail-empty">Could not fetch bench data: ' + esc(bench.error) + '</div>';
+      } else if (!bench.runs || bench.runs.length === 0) {
+        perfHtml += '<div class="bench-stub">No benchmark data.&nbsp; Run <code>mwoc bench</code> to measure token throughput and latency.</div>';
+      } else {
+        const summary = bench.runs[0];
+        const latest = bench.latest;
+        perfHtml += '<div class="bench-metric">';
+        if (summary.meanGenerationTokensPerSec !== null) {
+          perfHtml += '<div class="bench-toks">' + summary.meanGenerationTokensPerSec.toFixed(1)
+            + '<span style="font-size:13px;font-weight:400;color:var(--text-dim)"> tok/s</span></div>'
+            + '<div class="bench-toks-label">generation throughput</div>';
+        }
+        if (latest && latest.memory) {
+          const mem = latest.memory;
+          const proc = mem.processor !== 'unknown' ? mem.processor.toUpperCase() : null;
+          const modelGB = mem.modelSizeBytes ? (mem.modelSizeBytes / 1073741824).toFixed(1) + ' GB' : null;
+          if (proc || modelGB) {
+            perfHtml += '<div class="bench-mem">';
+            if (proc) perfHtml += proc;
+            if (proc && modelGB) perfHtml += ' · ';
+            if (modelGB) perfHtml += 'model ' + modelGB;
+            perfHtml += '</div>';
+          }
+        }
+        perfHtml += '<div class="bench-meta">' + esc(summary.suite) + ' suite'
+          + ' · ' + summary.runsPerPrompt + ' run' + (summary.runsPerPrompt !== 1 ? 's' : '') + '/prompt'
+          + ' · ' + formatAge(summary.timestamp) + '</div>';
+        perfHtml += '</div>';
+        if (bench.runs.length > 1) {
+          perfHtml += '<table class="bench-history">';
+          for (const r of bench.runs.slice(0, 5)) {
+            const tps = r.meanGenerationTokensPerSec !== null ? r.meanGenerationTokensPerSec.toFixed(1) + ' tok/s' : '—';
+            perfHtml += '<tr><td>' + formatAge(r.timestamp) + '</td><td>' + esc(r.suite) + '</td><td>' + tps + '</td></tr>';
+          }
+          perfHtml += '</table>';
+        }
+      }
+      perfHtml += '</div>';
 
       return metaHtml + capsHtml + perfHtml;
     }
@@ -699,14 +751,16 @@ function buildHtml(port: number): string {
       if (inner) inner.innerHTML = skeletonDetail();
 
       const model = findModel(modelId, resourceName);
-      const [infoRes, evalsRes] = await Promise.allSettled([
+      const [infoRes, evalsRes, benchRes] = await Promise.allSettled([
         fetch('/api/model-info?modelId=' + encodeURIComponent(modelId) + '&resourceName=' + encodeURIComponent(resourceName)).then(r => r.json()),
         fetch('/api/evals?modelId=' + encodeURIComponent(modelId) + '&resourceName=' + encodeURIComponent(resourceName)).then(r => r.json()),
+        fetch('/api/bench?modelId=' + encodeURIComponent(modelId) + '&resourceName=' + encodeURIComponent(resourceName)).then(r => r.json()),
       ]);
 
       expandCache[key] = {
         info: infoRes.status === 'fulfilled' ? infoRes.value : { error: infoRes.reason?.message ?? 'failed' },
         evals: evalsRes.status === 'fulfilled' ? evalsRes.value : { error: evalsRes.reason?.message ?? 'failed' },
+        bench: benchRes.status === 'fulfilled' ? benchRes.value : { error: benchRes.reason?.message ?? 'failed' },
       };
 
       // Only re-render if this row is still open
@@ -872,6 +926,32 @@ export async function startDashboard(): Promise<void> {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(err) }));
       }
+      return;
+    }
+
+    // ── GET /api/bench ─────────────────────────────────────────────────────
+    if (url.pathname === "/api/bench" && req.method === "GET") {
+      const modelId = url.searchParams.get("modelId");
+      const resourceName = url.searchParams.get("resourceName");
+      if (!modelId || !resourceName) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "modelId and resourceName are required" }));
+        return;
+      }
+      const allRuns = listBenchRuns();
+      const runs = allRuns.filter(
+        (r) => r.modelId === modelId && r.resourceName === resourceName,
+      );
+      let latest = null;
+      if (runs.length > 0) {
+        try {
+          latest = loadBenchRun(runs[0].id);
+        } catch {
+          // not critical — summaries are still returned
+        }
+      }
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ runs, latest }));
       return;
     }
 
