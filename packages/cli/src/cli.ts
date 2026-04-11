@@ -15,6 +15,7 @@ import {
   AUTH_FILE,
 } from "@mwoc/core";
 import type { CapabilityTier, Resource, RemoteServer } from "@mwoc/core";
+import { startDashboard } from "./dash.js";
 
 async function pingOllama(endpoint: string): Promise<boolean> {
   try {
@@ -227,7 +228,7 @@ resourceCmd.addCommand(
     .action(() => {
       const config = loadResourcesConfig();
       if (config.resources.length === 0) {
-        console.log(chalk.dim("No resources declared. Run: mwoc init"));
+        console.log(chalk.dim("No resources declared. Run: mwoc resource add"));
         return;
       }
       for (const r of config.resources) {
@@ -241,6 +242,127 @@ resourceCmd.addCommand(
                 : r.provider;
         console.log(`  ${r.name.padEnd(24)} ${chalk.dim(r.type.padEnd(8))} ${chalk.dim(detail)}`);
       }
+    })
+);
+
+resourceCmd.addCommand(
+  new Command("add")
+    .description("Add a single resource and append it to resources.yaml")
+    .action(async () => {
+      const config = loadResourcesConfig();
+      const existingNames = new Set(config.resources.map((r) => r.name));
+
+      const type = await select({
+        message: "Resource type:",
+        choices: [
+          { value: "local",  name: "Local machine  (Ollama)" },
+          { value: "cloud",  name: "Cloud provider (Anthropic, OpenAI, …)" },
+          { value: "server", name: "Remote server  (vLLM / SGLang over VPN or SSH)" },
+        ],
+      });
+
+      let resource: Resource;
+
+      if (type === "local") {
+        const endpoint = await input({
+          message: "Ollama endpoint:",
+          default: "http://localhost:11434",
+        });
+        const name = await input({
+          message: "Name for this resource:",
+          default: "local-ollama",
+        });
+        if (existingNames.has(name)) {
+          console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
+          return;
+        }
+        resource = { type: "local", name, backend: "ollama", endpoint };
+
+      } else if (type === "cloud") {
+        const provider = await input({
+          message: "Provider (e.g. anthropic, openai, google):",
+          default: "anthropic",
+        });
+        const accessKind = await select({
+          message: "Access type:",
+          choices: [
+            { value: "api",     name: "API key" },
+            { value: "web",     name: "Web subscription (claude.ai, chatgpt.com, …)" },
+          ],
+        });
+
+        if (accessKind === "web") {
+          const tier = await input({
+            message: "Subscription tier (e.g. Pro, Max, Plus, Edu):",
+            default: "Pro",
+          });
+          const name = await input({
+            message: "Name for this resource:",
+            default: `${provider}-${tier.toLowerCase()}`,
+          });
+          if (existingNames.has(name)) {
+            console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
+            return;
+          }
+          resource = { type: "cloud", name, provider, tier, webOnly: true };
+        } else {
+          const key = await password({ message: `API key for ${provider}:` });
+          const auth = loadAuth();
+          auth[provider] = { ...auth[provider], apiKey: key.trim() };
+          saveAuth(auth);
+          console.log(chalk.green(`✓ Saved API key for ${provider} to ${AUTH_FILE}`));
+
+          const name = await input({
+            message: "Name for this resource:",
+            default: `${provider}-api`,
+          });
+          if (existingNames.has(name)) {
+            console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
+            return;
+          }
+          resource = { type: "cloud", name, provider, tier: "API" };
+        }
+
+      } else {
+        // server
+        const name = await input({
+          message: "Name for this server:",
+          default: "gpu-server",
+        });
+        if (existingNames.has(name)) {
+          console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
+          return;
+        }
+        const endpoint = await input({
+          message: "Inference API endpoint URL:",
+          default: "http://10.0.0.1:8000",
+        });
+        const accessMethod = await select({
+          message: "How do you reach it?",
+          choices: [
+            { value: "direct",     name: "Direct — reachable over VPN or private network" },
+            { value: "ssh-tunnel", name: "SSH tunnel — forward the port locally first" },
+          ],
+        });
+
+        resource = {
+          type: "server",
+          name,
+          backend: "vllm",
+          endpoint,
+          accessMethod: accessMethod as "direct" | "ssh-tunnel",
+        };
+
+        if (accessMethod === "ssh-tunnel") {
+          (resource as RemoteServer).sshHost = await input({ message: "SSH hostname or IP:" });
+          (resource as RemoteServer).sshUser = await input({ message: "SSH username:" });
+        }
+      }
+
+      config.resources.push(resource);
+      saveResourcesConfig(config);
+      console.log(chalk.green(`✓ Added "${resource.name}" to ${RESOURCES_FILE}`));
+      console.log(chalk.dim("Run `mwoc probe` to scan it now."));
     })
 );
 
@@ -268,6 +390,24 @@ program
   .command("init")
   .description("First-run wizard: declare resources and authenticate providers")
   .action(async () => {
+    const existing = loadResourcesConfig();
+    if (existing.resources.length > 0) {
+      console.log(chalk.yellow(`\nWarning: ${existing.resources.length} resource(s) already configured in ${RESOURCES_FILE}.`));
+      console.log(chalk.yellow("Running init will replace your entire resource list.\n"));
+      console.log(chalk.dim("To add a single resource instead, run: mwoc resource add\n"));
+      const proceed = await select({
+        message: "Replace existing configuration and start over?",
+        choices: [
+          { value: false, name: "No, keep my current resources" },
+          { value: true,  name: "Yes, wipe and reconfigure from scratch" },
+        ],
+      });
+      if (!proceed) {
+        console.log(chalk.dim("Aborted. Your resources are unchanged."));
+        return;
+      }
+    }
+
     console.log(chalk.bold("\nWelcome to My World of Compute (MWoC)\n"));
     console.log(`Config will be stored in ${chalk.cyan(MWOC_DIR)}\n`);
 
@@ -480,11 +620,18 @@ program
     }
 
     // Save
-    const existing = loadResourcesConfig();
     saveResourcesConfig({ ...existing, resources });
 
     console.log(chalk.green(`\n✓ Saved ${resources.length} resource(s) to ${RESOURCES_FILE}`));
     console.log(chalk.dim("Run `mwoc probe` to scan them now.\n"));
+  });
+
+// --- mwoc dash ---
+program
+  .command("dash")
+  .description("Open the MWoC dashboard in a browser")
+  .action(async () => {
+    await startDashboard();
   });
 
 program.parse();
