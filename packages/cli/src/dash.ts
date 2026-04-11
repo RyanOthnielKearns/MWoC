@@ -195,8 +195,11 @@ function buildHtml(port: number): string {
       letter-spacing: 0.8px;
       color: var(--text-dim);
       padding: 6px 12px;
+      user-select: none;
+      transition: color 0.15s;
     }
     .models-table th:first-child { padding-left: 4px; }
+    .models-table th:hover { color: var(--text); }
     .model-list-row {
       border-bottom: 1px solid var(--border);
       cursor: pointer;
@@ -397,6 +400,7 @@ function buildHtml(port: number): string {
     let currentView = 'resources';
     let expandedRow = null;       // modelKey of the currently open accordion
     let expandCache = {};         // modelKey → { info, evals } (session cache)
+    let sortState = { col: 'tier', dir: 'asc' };
     let countdown = 5;
     let countdownTimer = null;
 
@@ -487,6 +491,23 @@ function buildHtml(port: number): string {
       }).join('');
     }
 
+    // ── Sorting ────────────────────────────────────────────────────────────
+    function setSort(col) {
+      if (sortState.col === col) {
+        sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        sortState.col = col;
+        // Default directions: context descending (largest first), others ascending
+        sortState.dir = col === 'context' ? 'desc' : 'asc';
+      }
+      if (currentState) renderModels(currentState);
+    }
+
+    function sortArrow(col) {
+      if (sortState.col !== col) return ' <span style="opacity:0.3">↕</span>';
+      return sortState.dir === 'asc' ? ' <span style="opacity:0.8">▲</span>' : ' <span style="opacity:0.8">▼</span>';
+    }
+
     // ── Models view ────────────────────────────────────────────────────────
     function renderModels(state) {
       const container = document.getElementById('models-table-container');
@@ -498,7 +519,21 @@ function buildHtml(port: number): string {
       const allModels = state.resources
         .filter(r => r.status === 'available')
         .flatMap(r => r.models.map(m => ({ ...m, resourceName: r.resource.name, resourceType: r.resource.type })));
-      allModels.sort((a, b) => tierOrder.indexOf(a.tier) - tierOrder.indexOf(b.tier));
+
+      // Apply sort
+      allModels.sort((a, b) => {
+        let cmp = 0;
+        if (sortState.col === 'tier') {
+          cmp = tierOrder.indexOf(a.tier) - tierOrder.indexOf(b.tier);
+        } else if (sortState.col === 'model') {
+          cmp = a.modelId.localeCompare(b.modelId);
+        } else if (sortState.col === 'source') {
+          cmp = a.resourceName.localeCompare(b.resourceName);
+        } else if (sortState.col === 'context') {
+          cmp = (a.contextWindow ?? 0) - (b.contextWindow ?? 0);
+        }
+        return sortState.dir === 'asc' ? cmp : -cmp;
+      });
 
       if (allModels.length === 0) {
         container.innerHTML = '<div class="empty-state"><h2>No models available</h2><p>Run <code>mwoc probe</code> to discover models.</p></div>';
@@ -508,9 +543,12 @@ function buildHtml(port: number): string {
       let rows = '';
       for (const m of allModels) {
         const key = modelKey(m.modelId, m.resourceName);
+        const safeKey = esc(key);
         const ctx = m.contextWindow ? (m.contextWindow/1000).toFixed(0) + 'k' : '—';
         const isOpen = expandedRow === key;
-        rows += '<tr class="model-list-row' + (isOpen ? ' expanded' : '') + '" onclick="toggleExpand(' + JSON.stringify(key) + ', ' + JSON.stringify(m.modelId) + ', ' + JSON.stringify(m.resourceName) + ')" id="mrow-' + esc(key) + '">'
+        // Bug fix: use esc(JSON.stringify(...)) so inner " become &quot; inside the onclick attribute
+        const onclickArgs = esc(JSON.stringify(key)) + ', ' + esc(JSON.stringify(m.modelId)) + ', ' + esc(JSON.stringify(m.resourceName));
+        rows += '<tr class="model-list-row' + (isOpen ? ' expanded' : '') + '" onclick="toggleExpand(' + onclickArgs + ')" id="mrow-' + safeKey + '">'
           + '<td><div class="model-name-cell">'
           + '<span class="expand-arrow' + (isOpen ? ' open' : '') + '">▶</span>'
           + '<div class="tier-dot ' + esc(m.tier) + '"></div>'
@@ -520,16 +558,19 @@ function buildHtml(port: number): string {
           + '<td class="source-cell">' + esc(m.resourceName) + '</td>'
           + '<td class="ctx-cell">' + ctx + '</td>'
           + '</tr>';
-        rows += '<tr class="detail-row' + (isOpen ? ' open' : '') + '" id="drow-' + esc(key) + '">'
+        rows += '<tr class="detail-row' + (isOpen ? ' open' : '') + '" id="drow-' + safeKey + '">'
           + '<td class="detail-cell" colspan="4">'
-          + '<div class="detail-inner" id="detail-inner-' + esc(key) + '">'
+          + '<div class="detail-inner" id="detail-inner-' + safeKey + '">'
           + (isOpen && expandCache[key] ? renderDetailContent(m, expandCache[key]) : skeletonDetail())
           + '</div></td></tr>';
       }
 
       container.innerHTML = '<table class="models-table">'
         + '<thead><tr>'
-        + '<th>Model</th><th>Tier</th><th>Source</th><th>Context</th>'
+        + '<th onclick="setSort(\\'model\\')" style="cursor:pointer">Model' + sortArrow('model') + '</th>'
+        + '<th onclick="setSort(\\'tier\\')" style="cursor:pointer">Tier' + sortArrow('tier') + '</th>'
+        + '<th onclick="setSort(\\'source\\')" style="cursor:pointer">Source' + sortArrow('source') + '</th>'
+        + '<th onclick="setSort(\\'context\\')" style="cursor:pointer">Context' + sortArrow('context') + '</th>'
         + '</tr></thead>'
         + '<tbody>' + rows + '</tbody></table>';
     }
