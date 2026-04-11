@@ -13,8 +13,23 @@ import {
   MWOC_DIR,
   RESOURCES_FILE,
   AUTH_FILE,
+  benchmarkOllama,
+  resolvePrompts,
+  PROMPT_SUITES,
+  saveBenchRun,
+  listBenchRuns,
+  loadBenchRun,
+  overallMeanToksPerSec,
+  BENCH_DIR,
 } from "@mwoc/core";
-import type { CapabilityTier, Resource, RemoteServer } from "@mwoc/core";
+import type {
+  CapabilityTier,
+  Resource,
+  RemoteServer,
+  BenchProgressEvent,
+  BenchRunResult,
+  BenchRun,
+} from "@mwoc/core";
 import { startDashboard } from "./dash.js";
 
 async function pingOllama(endpoint: string): Promise<boolean> {
@@ -632,6 +647,329 @@ program
   .description("Open the MWoC dashboard in a browser")
   .action(async () => {
     await startDashboard();
+  });
+
+// --- mwoc bench ---
+program
+  .command("bench")
+  .description("Benchmark local Ollama models for throughput and memory usage")
+  .option("--resource <name>", "Target resource (must be a local Ollama resource)")
+  .option("--model <id>", "Specific model ID to benchmark")
+  .option("--runs <n>", "Iterations per prompt", "3")
+  .option("--suite <name>", `Prompt suite: ${Object.keys(PROMPT_SUITES).join(", ")}`, "all")
+  .option("--prompt <text>", "Single custom prompt (overrides --suite)")
+  .option("--list", "List saved bench runs")
+  .option("--compare <ids>", "Compare two saved runs by ID prefix, comma-separated (e.g. --compare id1,id2)")
+  .action(async (opts: {
+    resource?: string;
+    model?: string;
+    runs: string;
+    suite: string;
+    prompt?: string;
+    list?: boolean;
+    compare?: string;
+  }) => {
+
+    // ── --list submode ──────────────────────────────────────────────────────
+    if (opts.list) {
+      const runs = listBenchRuns();
+      if (runs.length === 0) {
+        console.log(chalk.dim(`No bench results found. Run \`mwoc bench\` to create some.\n  Results are stored in ${BENCH_DIR}`));
+        return;
+      }
+      const table = new Table({
+        head: ["ID (prefix)", "Model", "Resource", "Suite", "Runs", "tok/s", "Date"].map(
+          (h) => chalk.bold(h),
+        ),
+        colWidths: [26, 28, 20, 12, 6, 10, 22],
+      });
+      for (const r of runs) {
+        const speed = r.meanGenerationTokensPerSec != null
+          ? r.meanGenerationTokensPerSec.toFixed(1)
+          : chalk.dim("—");
+        const date = new Date(r.timestamp).toLocaleString();
+        table.push([r.id.slice(0, 24), r.modelId, r.resourceName, r.suite, r.runsPerPrompt, speed, date]);
+      }
+      console.log(table.toString());
+      return;
+    }
+
+    // ── --compare submode ───────────────────────────────────────────────────
+    if (opts.compare) {
+      const parts = opts.compare.split(",").map((s) => s.trim());
+      if (parts.length !== 2) {
+        console.log(chalk.red("--compare requires exactly two comma-separated ID prefixes."));
+        process.exit(1);
+      }
+      let runA: BenchRun, runB: BenchRun;
+      try {
+        runA = loadBenchRun(parts[0]);
+        runB = loadBenchRun(parts[1]);
+      } catch (err) {
+        console.log(chalk.red(String(err)));
+        process.exit(1);
+      }
+
+      if (runA.suite !== runB.suite) {
+        console.log(chalk.yellow(`Warning: suites differ (${runA.suite} vs ${runB.suite}). Comparison may be misleading.`));
+      }
+
+      console.log(chalk.bold("\nComparing two benchmark runs:"));
+      console.log(`  A  ${chalk.cyan(runA.modelId.padEnd(24))} ${runA.resourceName}  ${new Date(runA.timestamp).toLocaleString()}`);
+      console.log(`  B  ${chalk.cyan(runB.modelId.padEnd(24))} ${runB.resourceName}  ${new Date(runB.timestamp).toLocaleString()}`);
+      console.log();
+
+      function fmtDelta(a: number | null, b: number | null, higherIsBetter: boolean): string {
+        if (a == null || b == null || a === 0) return chalk.dim("—");
+        const pct = ((b - a) / a) * 100;
+        const better = higherIsBetter ? pct > 0 : pct < 0;
+        const str = (pct >= 0 ? "+" : "") + pct.toFixed(0) + "%";
+        return better ? chalk.green(str) : chalk.red(str);
+      }
+
+      const meanA = overallMeanToksPerSec(runA);
+      const meanB = overallMeanToksPerSec(runB);
+      const loadA = runA.aggregates[0]?.meanLoadTime ?? null;
+      const loadB = runB.aggregates[0]?.meanLoadTime ?? null;
+      const memA  = runA.memory?.modelSizeBytes ?? null;
+      const memB  = runB.memory?.modelSizeBytes ?? null;
+      const promptA = runA.aggregates[0]
+        ? runA.aggregates.reduce((s, a) => s + a.meanPromptTokensPerSec, 0) / runA.aggregates.length
+        : null;
+      const promptB = runB.aggregates[0]
+        ? runB.aggregates.reduce((s, a) => s + a.meanPromptTokensPerSec, 0) / runB.aggregates.length
+        : null;
+
+      function fmtMem(bytes: number | null): string {
+        if (bytes == null) return chalk.dim("—");
+        return (bytes / 1e9).toFixed(2) + " GB";
+      }
+
+      const colA = 14, colB = 14, colD = 10;
+      const hdr = (s: string) => chalk.dim(s.padEnd(24));
+      const val = (s: string, w: number) => s.padStart(w);
+
+      console.log(
+        hdr("") +
+        chalk.bold("A".padStart(colA)) +
+        chalk.bold("B".padStart(colB)) +
+        chalk.bold("Δ".padStart(colD)),
+      );
+      console.log(chalk.dim("─".repeat(24 + colA + colB + colD)));
+
+      function row(label: string, a: string, b: string, delta: string) {
+        console.log(hdr(label) + val(a, colA) + val(b, colB) + val(delta, colD));
+      }
+
+      row(
+        "Generation speed",
+        meanA != null ? meanA.toFixed(1) + " tok/s" : "—",
+        meanB != null ? meanB.toFixed(1) + " tok/s" : "—",
+        fmtDelta(meanA, meanB, true),
+      );
+      row(
+        "Prompt speed",
+        promptA != null ? promptA.toFixed(1) + " tok/s" : "—",
+        promptB != null ? promptB.toFixed(1) + " tok/s" : "—",
+        fmtDelta(promptA, promptB, true),
+      );
+      row(
+        "Load time",
+        loadA != null ? loadA.toFixed(2) + "s" : "—",
+        loadB != null ? loadB.toFixed(2) + "s" : "—",
+        fmtDelta(loadA, loadB, false),
+      );
+      row(
+        "Memory",
+        fmtMem(memA),
+        fmtMem(memB),
+        fmtDelta(memA, memB, false),
+      );
+      row("Suite",       runA.suite,        runB.suite,        chalk.dim("—"));
+      row("Runs/prompt", String(runA.runsPerPrompt), String(runB.runsPerPrompt), chalk.dim("—"));
+      console.log();
+      return;
+    }
+
+    // ── Normal bench run ────────────────────────────────────────────────────
+
+    const runsPerPrompt = Math.max(1, parseInt(opts.runs, 10) || 3);
+
+    // Resolve resource
+    const state = getResourceState();
+    if (!state) {
+      console.log(chalk.yellow("No probe state found. Run `mwoc probe` first."));
+      process.exit(1);
+    }
+
+    let targetResource = opts.resource
+      ? state.resources.find((r) => r.resource.name === opts.resource)
+      : state.resources.find((r) => r.resource.type === "local" && r.status === "available");
+
+    if (!targetResource) {
+      const msg = opts.resource
+        ? `Resource "${opts.resource}" not found in probe state.`
+        : "No available local resource found.";
+      console.log(chalk.yellow(msg + " Run `mwoc probe` or check `mwoc resource list`."));
+      process.exit(1);
+    }
+
+    if (targetResource.resource.type !== "local") {
+      console.log(chalk.red(`mwoc bench only supports local Ollama resources. "${targetResource.resource.name}" is type "${targetResource.resource.type}".`));
+      process.exit(1);
+    }
+
+    const endpoint = (targetResource.resource as { endpoint: string }).endpoint;
+
+    // Resolve models
+    let modelIds: string[];
+    if (opts.model) {
+      const found = targetResource.models.find((m) => m.modelId === opts.model);
+      if (!found) {
+        console.log(chalk.yellow(`Model "${opts.model}" not found on ${targetResource.resource.name}. Run \`mwoc probe\` to refresh.`));
+        process.exit(1);
+      }
+      modelIds = [opts.model];
+    } else {
+      modelIds = targetResource.models.map((m) => m.modelId);
+      if (modelIds.length === 0) {
+        console.log(chalk.yellow(`No models found on ${targetResource.resource.name}. Run \`mwoc probe\` to refresh.`));
+        process.exit(1);
+      }
+      if (modelIds.length > 3) {
+        console.log(chalk.yellow(`Found ${modelIds.length} models on ${targetResource.resource.name}:`));
+        for (const id of modelIds) console.log(chalk.dim(`  ${id}`));
+        const proceed = await select({
+          message: "Benchmark all of them? (This may take a while)",
+          choices: [
+            { value: false, name: "No, cancel" },
+            { value: true,  name: "Yes, benchmark all" },
+          ],
+        });
+        if (!proceed) return;
+      }
+    }
+
+    // Resolve prompts
+    const suiteKey = PROMPT_SUITES[opts.suite] ? opts.suite : "all";
+    const prompts = resolvePrompts(suiteKey, opts.prompt);
+
+    // Run each model
+    for (const modelId of modelIds) {
+      const totalRuns = prompts.length * runsPerPrompt;
+      const suiteName = opts.prompt ? "custom" : suiteKey;
+
+      console.log(
+        chalk.cyan(`\nBenchmarking ${chalk.bold(modelId)}`) +
+        chalk.dim(`  ·  ${targetResource.resource.name}  ·  suite: ${suiteName}  ·  ${runsPerPrompt} run${runsPerPrompt !== 1 ? "s" : ""}/prompt  ·  ${totalRuns} total`),
+      );
+      console.log(chalk.dim("─".repeat(68)));
+
+      // Track per-prompt state for output
+      let lastPromptId = "";
+
+      function handleProgress(event: BenchProgressEvent) {
+        if (event.type === "prompt-start") {
+          lastPromptId = event.promptId;
+          const preview = event.promptText.length > 55
+            ? event.promptText.slice(0, 55) + "…"
+            : event.promptText;
+          console.log(`\n  ${chalk.bold(event.promptId)}  ${chalk.dim(`"${preview}"`)}`);
+        } else if (event.type === "run-done") {
+          const r: BenchRunResult = event.result;
+          const runLabel = `Run ${event.runIndex + 1}/${event.runsPerPrompt}`;
+          console.log(
+            chalk.dim(`  ${runLabel.padEnd(10)}`) +
+            chalk.green("✓") +
+            chalk.dim(`  ${r.generationTokens} tok`) +
+            `  ${r.generationTime.toFixed(2)}s` +
+            `  ${chalk.bold(r.generationTokensPerSec.toFixed(1))} tok/s`,
+          );
+        } else if (event.type === "run-error") {
+          console.log(
+            chalk.dim(`  Run ${event.runIndex + 1}/${runsPerPrompt}  `) +
+            chalk.red(`✗  ${event.error.slice(0, 60)}`),
+          );
+        } else if (event.type === "memory-captured") {
+          // Printed in summary below
+        }
+      }
+
+      const benchRun = await benchmarkOllama(
+        endpoint,
+        modelId,
+        targetResource.resource.name,
+        prompts,
+        runsPerPrompt,
+        handleProgress,
+      );
+      benchRun.suite = suiteName;
+
+      // Per-prompt aggregate lines
+      for (const agg of benchRun.aggregates) {
+        if (agg.runCount === 0) continue;
+        const loadStr = agg.meanLoadTime > 0.01
+          ? chalk.dim(`load ${agg.meanLoadTime.toFixed(2)}s · `)
+          : "";
+        const promptStr = chalk.dim(`prompt ${agg.meanPromptTokensPerSec.toFixed(0)} tok/s · `);
+        const genStr = `generate ${chalk.yellow(agg.meanGenerationTokensPerSec.toFixed(1))}`;
+        const sdStr = agg.runCount > 1
+          ? chalk.dim(` ± ${agg.stddevGenerationTokensPerSec.toFixed(1)}`) + " tok/s"
+          : " tok/s";
+        console.log(`  ${chalk.dim("─")} ${loadStr}${promptStr}${genStr}${sdStr}`);
+      }
+
+      // Summary block
+      const overallSpeed = overallMeanToksPerSec(benchRun);
+      const allGenToks = benchRun.results.map((r) => r.generationTokensPerSec);
+      const overallStddev = allGenToks.length > 1
+        ? Math.sqrt(allGenToks.map((v) => (v - (overallSpeed ?? 0)) ** 2).reduce((a, b) => a + b, 0) / allGenToks.length)
+        : 0;
+      const allPromptToks = benchRun.results.map((r) => r.promptTokensPerSec);
+      const meanPromptSpeed = allPromptToks.length > 0
+        ? allPromptToks.reduce((a, b) => a + b, 0) / allPromptToks.length
+        : 0;
+      const firstLoad = benchRun.results.find((r) => r.runIndex === 0)?.loadTime ?? 0;
+      const mem = benchRun.memory;
+
+      console.log("\n" + chalk.dim("─".repeat(68)));
+      console.log(chalk.green(`SUMMARY  ${chalk.bold(modelId)}`));
+
+      if (overallSpeed != null) {
+        console.log(
+          `  ${chalk.bold("Generation").padEnd(18)}` +
+          chalk.green(`${overallSpeed.toFixed(1)} ± ${overallStddev.toFixed(1)} tok/s`) +
+          chalk.dim("  (mean ± stddev, all prompts)"),
+        );
+      }
+      if (meanPromptSpeed > 0) {
+        const promptTokStddev = allPromptToks.length > 1
+          ? Math.sqrt(allPromptToks.map((v) => (v - meanPromptSpeed) ** 2).reduce((a, b) => a + b, 0) / allPromptToks.length)
+          : 0;
+        console.log(
+          `  ${"Prompt eval".padEnd(18)}` +
+          `${meanPromptSpeed.toFixed(1)} ± ${promptTokStddev.toFixed(1)} tok/s`,
+        );
+      }
+      if (firstLoad > 0.01) {
+        console.log(`  ${"Load time".padEnd(18)}${firstLoad.toFixed(2)}s${chalk.dim("  (first inference)")}`);
+      }
+      if (mem) {
+        const sizeGB = mem.modelSizeBytes != null ? (mem.modelSizeBytes / 1e9).toFixed(2) + " GB" : "unknown";
+        const proc = mem.processor === "gpu" ? chalk.green("GPU") : mem.processor === "cpu" ? "CPU" : chalk.dim("unknown");
+        console.log(`  ${"Memory".padEnd(18)}${sizeGB}  ·  ${proc}`);
+        console.log(
+          chalk.dim(
+            `  ${"System RAM".padEnd(18)}` +
+            `${(mem.systemFreeMemBytes / 1e9).toFixed(1)} GB free / ` +
+            `${(mem.systemTotalMemBytes / 1e9).toFixed(1)} GB total`,
+          ),
+        );
+      }
+
+      const savedPath = saveBenchRun(benchRun);
+      console.log(`\n${chalk.dim("Saved →")} ${chalk.cyan(savedPath)}\n`);
+    }
   });
 
 program.parse();

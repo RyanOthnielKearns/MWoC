@@ -114,3 +114,63 @@ export interface ModelEvalData {
   arenaELO: ArenaELOResult | null;
   fetchedAt: string;
 }
+
+// --- Bench types ---
+
+export interface BenchPrompt {
+  id: string;
+  category: "coding" | "writing" | "reasoning";
+  text: string;
+}
+
+export interface BenchRunResult {
+  promptId: string;
+  runIndex: number;               // 0-based
+  loadTime: number;               // seconds (load_duration / 1e9)
+  promptEvalTime: number;         // seconds (prompt_eval_duration / 1e9)
+  generationTime: number;         // seconds (eval_duration / 1e9)
+  totalTime: number;              // seconds (total_duration / 1e9)
+  promptTokens: number;           // prompt_eval_count
+  generationTokens: number;       // eval_count
+  promptTokensPerSec: number;     // promptTokens / promptEvalTime
+  generationTokensPerSec: number; // generationTokens / generationTime
+}
+
+export interface BenchAggregate {
+  promptId: string;
+  runCount: number;
+  meanGenerationTokensPerSec: number;
+  stddevGenerationTokensPerSec: number;
+  meanPromptTokensPerSec: number;
+  stddevPromptTokensPerSec: number;
+  meanLoadTime: number;
+  meanTotalTime: number;
+  stddevTotalTime: number;
+}
+
+export interface BenchMemorySnapshot {
+  processor: "cpu" | "gpu" | "unknown";
+  modelSizeBytes: number | null;  // Ollama /api/ps → models[n].size
+  vramSizeBytes: number | null;   // Ollama /api/ps → models[n].size_vram
+  systemTotalMemBytes: number;    // os.totalmem()
+  systemFreeMemBytes: number;     // os.freemem() captured after first inference
+}
+
+export interface BenchRun {
+  id: string;               // sanitized "{ISO}-{resourceName}-{modelId}"
+  modelId: string;
+  resourceName: string;
+  suite: string;
+  runsPerPrompt: number;
+  results: BenchRunResult[];    // all individual results across all prompts × runs
+  aggregates: BenchAggregate[]; // one per promptId
+  memory: BenchMemorySnapshot | null;
+  timestamp: string;            // ISO
+}
+
+export type BenchProgressEvent =
+  | { type: "run-start";        promptId: string; runIndex: number; runsPerPrompt: number }
+  | { type: "run-done";         promptId: string; runIndex: number; result: BenchRunResult }
+  | { type: "run-error";        promptId: string; runIndex: number; error: string }
+  | { type: "memory-captured";  snapshot: BenchMemorySnapshot }
+  | { type: "prompt-start";     promptId: string; promptText: string };
