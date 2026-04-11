@@ -1,0 +1,8 @@
+{
+  "id": "mwoc",
+  "name": "My World of Compute",
+  "version": "0.1.0",
+  "description": "Exposes your personal compute registry to agents. Provides tools to list available models by capability tier and re-probe resource availability — enabling cost-aware sub-agent dispatch.",
+  "entry": "./dist/index.js",
+  "capabilities": ["tools", "skills"]
+}
