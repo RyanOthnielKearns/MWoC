@@ -40,6 +40,26 @@ function buildHtml(port: number): string {
       --unavailable: #ef4444;
       --unknown: #f59e0b;
       --accent: #a78bfa;
+      --code-bg: rgba(255,255,255,0.08);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #ffffff;
+        --surface: #f6f8fa;
+        --surface2: #eaeef2;
+        --border: #d0d7de;
+        --text: #1f2328;
+        --text-dim: #656d76;
+        --frontier: #6d28d9;
+        --mid: #1d4ed8;
+        --local-large: #15803d;
+        --local-small: #6b7280;
+        --available: #16a34a;
+        --unavailable: #dc2626;
+        --unknown: #b45309;
+        --accent: #6d28d9;
+        --code-bg: rgba(0,0,0,0.06);
+      }
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -61,7 +81,7 @@ function buildHtml(port: number): string {
       justify-content: space-between;
       flex-shrink: 0;
     }
-    .logo { font-size: 15px; font-weight: 700; color: #fff; letter-spacing: -0.3px; }
+    .logo { font-size: 15px; font-weight: 700; color: var(--text); letter-spacing: -0.3px; }
     .logo span { color: var(--frontier); }
     .header-right { display: flex; align-items: center; gap: 14px; }
     .last-probed { color: var(--text-dim); font-size: 11px; }
@@ -110,7 +130,7 @@ function buildHtml(port: number): string {
     .stat:last-child { border-right: none; }
     .stat.clickable { cursor: pointer; }
     .stat.clickable:hover .stat-value { color: var(--accent); }
-    .stat-value { font-size: 22px; font-weight: 700; color: #fff; transition: color 0.15s; }
+    .stat-value { font-size: 22px; font-weight: 700; color: var(--text); transition: color 0.15s; }
     .stat-label { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 
     /* ── Main content ── */
@@ -158,7 +178,7 @@ function buildHtml(port: number): string {
       justify-content: space-between;
       margin-bottom: 10px;
     }
-    .card-name { font-weight: 600; color: #fff; font-size: 13px; }
+    .card-name { font-weight: 600; color: var(--text); font-size: 13px; }
     .card-type { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
     .status-badge {
       font-size: 10px;
@@ -292,7 +312,7 @@ function buildHtml(port: number): string {
     }
     .bench-stub code {
       color: var(--text);
-      background: rgba(255,255,255,0.06);
+      background: var(--code-bg);
       padding: 1px 5px;
       border-radius: 3px;
       font-family: inherit;
