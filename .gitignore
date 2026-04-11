@@ -2,3 +2,7 @@
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Files for local testing and development
+TODO.md
+reference/
