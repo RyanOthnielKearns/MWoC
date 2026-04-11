@@ -1,12 +1,12 @@
 # My World of Compute (MWoC)
 
-A personal compute registry and agent dispatch layer — tracking every model and hardware resource available to me, and enabling intelligent sub-agent routing to preserve frontier LLM budget.
+A personal compute registry and agent dispatch layer — tracking every model and resource available to me, and enabling intelligent sub-agent routing to preserve frontier LLM budget.
 
 ---
 
 ## What This Is
 
-MWoC maintains a structured index of all compute resources I have access to: local hardware, cloud subscriptions, and remote GPU rigs. It serves two audiences:
+MWoC maintains a structured index of all compute resources I have access to: local hardware, cloud subscriptions, and remote servers. It serves two audiences:
 
 **Me** — so I can see what I have, understand what each resource is capable of, and stay current as the model landscape evolves. Without active maintenance, subscriptions go stale, local models fall behind, and the mental model of "what can I run where" degrades quietly.
 
@@ -14,72 +14,81 @@ MWoC maintains a structured index of all compute resources I have access to: loc
 
 ---
 
-## Resource Categories
+## Resource Types
 
-### Local Machine
-- Hardware specs (CPU, GPU, RAM, storage)
-- Supported model families and max parameter sizes
-- Inference backends (e.g., Ollama, llama.cpp, LM Studio)
-- Currently loaded / available models
+### Local machine
+A machine running Ollama (or a compatible backend) locally. Models are discovered automatically by probing the Ollama API at startup.
 
-### Cloud Subscriptions
-- Provider, tier, and rate limits
-- Available models per tier
-- Remaining session budget (where queryable)
-- Renewal cadence and deprecation schedule
+### Cloud subscriptions
+Two distinct things that are easy to conflate:
 
-### Remote GPU Rigs (VPN)
-- Connection details and access method
-- Hardware specs per rig
-- Inference stack and available models
-- Latency and throughput characteristics
+- **Web subscriptions** (Claude Pro, Claude Max, ChatGPT Plus/Edu) — tracked for human awareness; not directly queryable by agents
+- **API access** (Anthropic API, OpenAI API) — probeable, agent-usable; requires an API key stored in `~/.mwoc/auth.json`
+
+### Remote servers
+Any machine you have network access to that runs an OpenAI-compatible inference API (vLLM, SGLang, etc.) — a shared GPU machine over VPN, a lab server, a home box you SSH into. Access method can be direct (VPN IP) or via SSH tunnel.
 
 ---
 
-## Two Core Use Cases
+## Capability Tiers
 
-### 1. Human Awareness Layer
+Every model in the registry is tagged with a tier. These are used by agents to select the cheapest resource sufficient for a given subtask.
 
-A living document / dashboard answering:
-- What do I have right now?
-- What am I paying for vs. actually using?
-- What's coming out that I should care about? (frontier model releases, open-source checkpoints, deprecations)
-- Is anything I rely on being sunset?
-
-This layer should surface diffs — when a model gets updated, deprecated, or superseded — so the stack doesn't silently atrophy.
-
-### 2. Agent Dispatch Layer
-
-A machine-readable interface that orchestrators can call to:
-- Enumerate available backends by capability tier
-- Select the cheapest resource sufficient for a given subtask
-- Check budget / rate-limit headroom before dispatching
-- Fall back gracefully (e.g., local model when frontier session is exhausted)
-
-The goal is to break a complex task into a directed graph of subtasks, tag each with a required capability level, and route each to the appropriate compute — preserving frontier budget for the steps that genuinely require it.
-
----
-
-## Capability Tiers (Draft)
-
-| Tier | Description | Example Use |
+| Tier | Description | Example use |
 |------|-------------|-------------|
-| `frontier` | Best available reasoning, coding, long context | Architecture decisions, complex debugging, novel synthesis |
-| `mid` | Strong general-purpose, lower cost | Drafting, code generation, summarization |
-| `local-large` | On-device, no rate limits, moderate capability | Iteration, reformatting, structured extraction |
-| `local-small` | Fast, low memory, on-device | Classification, routing decisions, templating |
+| `frontier` | Best available reasoning, long context, novel synthesis | Architecture decisions, complex debugging |
+| `mid` | Strong general-purpose at lower cost | Drafting, code generation, summarization |
+| `local-large` | On-device, no rate limits, moderate capability | Reformatting, structured extraction, iteration |
+| `local-small` | Fast, low memory, on-device | Classification, routing, templating |
+
+Tier assignments for well-known models are built in. They can be overridden per-resource in `~/.mwoc/resources.yaml`.
+
+---
+
+## CLI
+
+Installed globally as `mwoc`. All configuration lives in `~/.mwoc/`.
+
+```sh
+mwoc init                        # first-run wizard
+mwoc probe                       # scan all resources, update state cache
+mwoc status                      # table of resources and availability
+mwoc models [--tier <tier>]      # list available models, grouped by tier
+
+mwoc resource list               # list declared resources
+mwoc resource remove <name>      # remove a resource
+
+mwoc auth add <provider>         # store an API key
+mwoc auth remove <provider>      # delete a stored key
+mwoc auth list                   # show which providers have a key (masked)
+```
+
+---
+
+## Agent Interface (OpenClaw Plugin)
+
+An OpenClaw plugin exposes two tools and a skill to agents:
+
+- **`mwoc_list_models`** — returns all available models grouped by tier with descriptions; used by an agent to reason about which model fits a subtask
+- **`mwoc_probe`** — re-probes all resources and returns fresh availability data
+- **`mwoc_select_model` skill** — a guided flow that takes a subtask description and recommends the most cost-efficient capable model
 
 ---
 
 ## Design Principles
 
-- **Agent-first schema**: the resource index should be structured so agents can parse and act on it without natural language interpretation
-- **Human-readable too**: the same data should be easy for me to read and edit directly
-- **Pull-based freshness**: model availability and rate limits should be queryable at dispatch time, not just statically declared
-- **Minimal dependencies**: the dispatch layer should not require a running server if it can be a library or CLI tool
+- **Agent-first schema** — the resource index is structured so agents can parse and act on it without natural language interpretation
+- **Human-readable too** — the same data is easy to read and edit directly (`resources.yaml`)
+- **Pull-based freshness** — model availability is queryable at dispatch time, not just statically declared
+- **No required server** — the dispatch layer is a library and CLI, not a daemon
 
 ---
 
-## Status
+## Roadmap
 
-Early scaffolding. Resource inventory not yet populated. Dispatch interface not yet designed.
+- SSH tunnel helper (`mwoc tunnel <server>`) for remote servers that require port-forwarding
+- Google/Gemini provider support
+- `mwoc auth list` shows key age / last-used metadata
+- Automated model release tracking — surface new and deprecated models without manual checking
+- Budget/usage metering per provider
+- Publish `@mwoc/openclaw-plugin` to npm
