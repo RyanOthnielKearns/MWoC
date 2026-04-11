@@ -16,11 +16,11 @@ A personal compute registry and agent dispatch layer. MWoC tracks every LLM reso
 
 | Document | Contents |
 |---|---|
-| [Getting Started](getting-started.md) | Installation, first-run wizard, first probe |
+| [Getting Started](getting-started.md) | Installation, first-run wizard, first probe, adding resources |
 | [CLI Reference](cli.md) | All `mwoc` commands and options |
 | [Resource Types](resource-types.md) | Local machine, cloud subscriptions, remote servers |
 | [Capability Tiers](capability-tiers.md) | Tier system, built-in model mappings, user overrides |
-| [Config Files](config.md) | `~/.mwoc/` layout: `auth.json`, `resources.yaml`, `state.json` |
+| [Config Files](config.md) | `~/.mwoc/` layout: `auth.json`, `resources.yaml`, `state.json`, `bench/`, `evals/` |
 | [OpenClaw Plugin](openclaw-plugin.md) | Tools, skill, installation, roadmap |
 
 ---
@@ -28,6 +28,7 @@ A personal compute registry and agent dispatch layer. MWoC tracks every LLM reso
 ## Roadmap
 
 - `mwoc tunnel <server>` — SSH port-forward helper for remote servers
+- Dashboard enhancements: running-model list via `/api/ps`, GPU utilization, hardware specs, SSE push for live updates
 - Google/Gemini provider support
 - Automated model release tracking — surface new and deprecated models
 - Budget/usage metering per provider

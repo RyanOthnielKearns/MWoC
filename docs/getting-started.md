@@ -93,3 +93,15 @@ mwoc probe --resource local-ollama
 ```
 
 The name must match a resource declared in `~/.mwoc/resources.yaml`. See `mwoc resource list` for the names.
+
+---
+
+## Adding resources after setup
+
+To add a single resource without re-running `mwoc init`, use:
+
+```sh
+mwoc resource add
+```
+
+This runs the same interactive prompts for one resource and appends the result to `~/.mwoc/resources.yaml`. Re-running `mwoc init` is also possible, but it replaces the entire resource list — you will be warned and asked to confirm before any changes are made.
