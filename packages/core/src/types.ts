@@ -82,3 +82,35 @@ export interface ResourcesConfig {
   // Optional user overrides for tier assignments
   tierOverrides?: Record<string, CapabilityTier>;
 }
+
+// --- Eval / benchmark types ---
+
+export interface OllamaModelInfo {
+  family: string;
+  parameterSize: string;
+  quantizationLevel: string;
+  format: string;
+}
+
+export interface HFEvalResult {
+  datasetName: string;
+  metricName: string;
+  metricValue: number;
+  taskType: string;
+}
+
+export interface ArenaELOResult {
+  rank: number;
+  model: string;
+  score: number | null;
+  ci: number | null;
+  votes: number | null;
+}
+
+export interface ModelEvalData {
+  hfModelId: string | null;
+  hfMatchConfidence: "exact" | "auto" | "none";
+  hfEvals: HFEvalResult[];
+  arenaELO: ArenaELOResult | null;
+  fetchedAt: string;
+}
