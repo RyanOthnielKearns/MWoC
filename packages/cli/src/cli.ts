@@ -4,7 +4,6 @@ import Table from "cli-table3";
 import { input, password, select } from "@inquirer/prompts";
 import {
   probeAll,
-  listResources,
   listModels,
   getResourceState,
   loadAuth,
@@ -15,7 +14,19 @@ import {
   RESOURCES_FILE,
   AUTH_FILE,
 } from "@mwoc/core";
-import type { CapabilityTier, Resource } from "@mwoc/core";
+import type { CapabilityTier, Resource, RemoteServer } from "@mwoc/core";
+
+async function pingOllama(endpoint: string): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(`${endpoint}/api/tags`, { signal: controller.signal });
+    clearTimeout(id);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
 const TIER_COLORS: Record<CapabilityTier, chalk.Chalk> = {
   frontier: chalk.magenta,
@@ -62,15 +73,22 @@ program
             ? chalk.red("unavailable")
             : chalk.yellow("unknown");
 
-      const typeStr = r.resource.type;
+      const typeStr =
+        r.resource.type === "server"
+          ? "server"
+          : r.resource.type === "cloud" && r.resource.webOnly
+            ? "web sub"
+            : r.resource.type;
       const notes =
-        r.error
+        r.error && r.status !== "unknown"
           ? chalk.dim(r.error.slice(0, 40))
           : r.resource.type === "local"
             ? r.resource.endpoint
-            : r.resource.type === "remote"
+            : r.resource.type === "server"
               ? r.resource.endpoint
-              : r.resource.provider;
+              : r.resource.type === "cloud" && r.resource.webOnly
+                ? `${r.resource.provider} (web only)`
+                : r.resource.provider;
 
       table.push([r.resource.name, typeStr, statusStr, r.models.length, notes]);
     }
@@ -171,125 +189,222 @@ program
   .description("First-run wizard: declare resources and authenticate providers")
   .action(async () => {
     console.log(chalk.bold("\nWelcome to My World of Compute (MWoC)\n"));
-    console.log(
-      `Config will be stored in ${chalk.cyan(MWOC_DIR)}\n`
-    );
+    console.log(`Config will be stored in ${chalk.cyan(MWOC_DIR)}\n`);
 
     const resources: Resource[] = [];
 
-    // Local Ollama
-    const addOllama = await select({
-      message: "Do you have Ollama running locally?",
-      choices: [
-        { value: true, name: "Yes" },
-        { value: false, name: "No" },
-      ],
-    });
+    // --- Local Ollama ---
+    console.log(chalk.bold("Local machine"));
+    const OLLAMA_DEFAULT = "http://localhost:11434";
+    process.stdout.write(chalk.dim(`Checking for Ollama at ${OLLAMA_DEFAULT}... `));
+    const ollamaFound = await pingOllama(OLLAMA_DEFAULT);
 
-    if (addOllama) {
-      const endpoint = await input({
-        message: "Ollama endpoint:",
-        default: "http://localhost:11434",
+    if (ollamaFound) {
+      console.log(chalk.green("found"));
+      const addOllama = await select({
+        message: "Add it to MWoC?",
+        choices: [
+          { value: true, name: "Yes" },
+          { value: false, name: "No" },
+        ],
       });
-      const name = await input({
-        message: "Name for this resource:",
-        default: "local-ollama",
+      if (addOllama) {
+        resources.push({
+          type: "local",
+          name: "local-ollama",
+          backend: "ollama",
+          endpoint: OLLAMA_DEFAULT,
+        });
+      }
+    } else {
+      console.log(chalk.dim("not found"));
+      const ollamaElsewhere = await select({
+        message: "Is Ollama running at a different address?",
+        choices: [
+          { value: true, name: "Yes" },
+          { value: false, name: "No" },
+        ],
       });
-      resources.push({ type: "local", name, backend: "ollama", endpoint });
+      if (ollamaElsewhere) {
+        const endpoint = await input({
+          message: "Ollama endpoint:",
+          default: OLLAMA_DEFAULT,
+        });
+        const name = await input({
+          message: "Name for this resource:",
+          default: "local-ollama",
+        });
+        resources.push({ type: "local", name, backend: "ollama", endpoint });
+      }
     }
 
-    // Anthropic
-    const addAnthropic = await select({
-      message: "Do you have an Anthropic API key (Claude Pro / API)?",
+    // --- Anthropic ---
+    console.log("\n" + chalk.bold("Anthropic"));
+    console.log(chalk.dim("Claude Pro (claude.ai) and the Anthropic API are separate services."));
+
+    const hasClaudePro = await select({
+      message: "Do you have a Claude Pro or Claude Max subscription (claude.ai)?",
       choices: [
         { value: true, name: "Yes" },
         { value: false, name: "No" },
       ],
     });
+    if (hasClaudePro) {
+      const tier = await select({
+        message: "Which plan?",
+        choices: [
+          { value: "Pro", name: "Claude Pro ($20/mo)" },
+          { value: "Max", name: "Claude Max ($100/mo)" },
+          { value: "Team", name: "Claude Team" },
+        ],
+      });
+      resources.push({
+        type: "cloud",
+        name: `claude-${(tier as string).toLowerCase()}`,
+        provider: "anthropic",
+        tier: tier as string,
+        webOnly: true,
+      });
+      console.log(chalk.green(`✓ Claude ${tier} subscription noted`));
+    }
 
-    if (addAnthropic) {
+    const hasAnthropicApi = await select({
+      message: "Do you have an Anthropic API key?",
+      choices: [
+        { value: true, name: "Yes" },
+        { value: false, name: "No" },
+      ],
+    });
+    if (hasAnthropicApi) {
       const key = await password({ message: "Anthropic API key:" });
       const auth = loadAuth();
       auth["anthropic"] = { apiKey: key.trim() };
       saveAuth(auth);
       resources.push({
         type: "cloud",
-        name: "anthropic",
+        name: "anthropic-api",
         provider: "anthropic",
-        tier: "Pro",
+        tier: "API",
       });
-      console.log(chalk.green("✓ Anthropic key saved"));
+      console.log(chalk.green("✓ Anthropic API key saved"));
     }
 
-    // OpenAI
-    const addOpenAI = await select({
-      message: "Do you have an OpenAI API key or ChatGPT Edu subscription?",
+    // --- OpenAI ---
+    console.log("\n" + chalk.bold("OpenAI"));
+    console.log(chalk.dim("ChatGPT subscriptions and the OpenAI API are separate services."));
+
+    const hasChatGPT = await select({
+      message: "Do you have a ChatGPT subscription (chatgpt.com)?",
       choices: [
         { value: true, name: "Yes" },
         { value: false, name: "No" },
       ],
     });
-
-    if (addOpenAI) {
-      const key = await password({ message: "OpenAI API key:" });
-      const tierLabel = await input({
-        message: "Subscription tier label (e.g. Edu, Plus):",
-        default: "Edu",
+    if (hasChatGPT) {
+      const tier = await input({
+        message: "Subscription tier (e.g. Plus, Edu, Team, Pro):",
+        default: "Plus",
       });
+      resources.push({
+        type: "cloud",
+        name: `chatgpt-${tier.toLowerCase()}`,
+        provider: "openai",
+        tier,
+        webOnly: true,
+      });
+      console.log(chalk.green(`✓ ChatGPT ${tier} subscription noted`));
+    }
+
+    const hasOpenAIApi = await select({
+      message: "Do you have an OpenAI API key?",
+      choices: [
+        { value: true, name: "Yes" },
+        { value: false, name: "No" },
+      ],
+    });
+    if (hasOpenAIApi) {
+      const key = await password({ message: "OpenAI API key:" });
       const auth = loadAuth();
       auth["openai"] = { apiKey: key.trim() };
       saveAuth(auth);
       resources.push({
         type: "cloud",
-        name: "openai",
+        name: "openai-api",
         provider: "openai",
-        tier: tierLabel,
+        tier: "API",
       });
-      console.log(chalk.green("✓ OpenAI key saved"));
+      console.log(chalk.green("✓ OpenAI API key saved"));
     }
 
-    // Remote VPN rig
-    const addRemote = await select({
-      message: "Do you have a remote GPU rig accessible over VPN?",
-      choices: [
-        { value: true, name: "Yes" },
-        { value: false, name: "No" },
-      ],
-    });
+    // --- Remote servers ---
+    console.log("\n" + chalk.bold("Remote servers"));
+    console.log(
+      chalk.dim(
+        "A remote server is any machine you have network access to that runs an inference API\n" +
+        chalk.dim("(e.g. a shared GPU machine over VPN, a lab server, a home box you SSH into).")
+      )
+    );
 
-    if (addRemote) {
-      const name = await input({ message: "Name for this rig:", default: "gpu-rig-1" });
+    let addAnotherServer = true;
+    let serverCount = 0;
+
+    while (addAnotherServer) {
+      const prompt = serverCount === 0
+        ? "Do you have access to a remote server running an inference API?"
+        : "Add another remote server?";
+
+      const addServer = await select({
+        message: prompt,
+        choices: [
+          { value: true, name: "Yes" },
+          { value: false, name: "No" },
+        ],
+      });
+
+      if (!addServer) {
+        addAnotherServer = false;
+        break;
+      }
+
+      const name = await input({
+        message: "Name for this server:",
+        default: `server-${serverCount + 1}`,
+      });
       const endpoint = await input({
-        message: "vLLM/SGLang endpoint URL (when VPN is connected):",
+        message: "Inference API endpoint URL:",
         default: "http://10.0.0.1:8000",
       });
       const accessMethod = await select({
         message: "How do you reach it?",
         choices: [
-          { value: "direct", name: "Direct over VPN IP" },
-          { value: "ssh-tunnel", name: "SSH tunnel to forward the port" },
+          { value: "direct", name: "Direct — reachable over VPN or private network" },
+          { value: "ssh-tunnel", name: "SSH tunnel — forward the port locally first" },
         ],
       });
-      const rig: Resource = {
-        type: "remote",
+
+      const server: Resource = {
+        type: "server",
         name,
         backend: "vllm",
         endpoint,
         accessMethod: accessMethod as "direct" | "ssh-tunnel",
       };
+
       if (accessMethod === "ssh-tunnel") {
-        rig.sshHost = await input({ message: "SSH hostname or IP:" });
-        rig.sshUser = await input({ message: "SSH username:" });
+        (server as RemoteServer).sshHost = await input({ message: "SSH hostname or IP:" });
+        (server as RemoteServer).sshUser = await input({ message: "SSH username:" });
       }
-      resources.push(rig);
+
+      resources.push(server);
+      serverCount++;
     }
 
-    // Save resources config
+    // Save
     const existing = loadResourcesConfig();
     saveResourcesConfig({ ...existing, resources });
 
     console.log(chalk.green(`\n✓ Saved ${resources.length} resource(s) to ${RESOURCES_FILE}`));
-    console.log(chalk.dim("\nRun `mwoc probe` to scan them now.\n"));
+    console.log(chalk.dim("Run `mwoc probe` to scan them now.\n"));
   });
 
 program.parse();

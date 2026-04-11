@@ -1,7 +1,7 @@
 import type {
   LocalMachine,
   CloudSubscription,
-  RemoteRig,
+  RemoteServer,
   ProbedResource,
   ModelEntry,
 } from "./types.js";
@@ -94,8 +94,8 @@ export async function probeOpenAICompatible(
   }));
 }
 
-export async function probeRemoteRig(
-  resource: RemoteRig,
+export async function probeRemoteServer(
+  resource: RemoteServer,
   tierOverrides?: Record<string, string>
 ): Promise<ProbedResource> {
   try {
@@ -127,6 +127,16 @@ export async function probeAnthropic(
   resource: CloudSubscription,
   tierOverrides?: Record<string, string>
 ): Promise<ProbedResource> {
+  if (resource.webOnly) {
+    return {
+      resource,
+      status: "unknown",
+      models: [],
+      probedAt: timestamp(),
+      error: "Web subscription — no API access to probe",
+    };
+  }
+
   const apiKey = getApiKey("anthropic");
   if (!apiKey) {
     return {
@@ -173,6 +183,16 @@ export async function probeOpenAI(
   resource: CloudSubscription,
   tierOverrides?: Record<string, string>
 ): Promise<ProbedResource> {
+  if (resource.webOnly) {
+    return {
+      resource,
+      status: "unknown",
+      models: [],
+      probedAt: timestamp(),
+      error: "Web subscription — no API access to probe",
+    };
+  }
+
   const apiKey = getApiKey("openai");
   if (!apiKey) {
     return {
@@ -220,8 +240,8 @@ export async function probeResource(
     };
   }
 
-  if (resource.type === "remote") {
-    return probeRemoteRig(resource, tierOverrides);
+  if (resource.type === "server") {
+    return probeRemoteServer(resource, tierOverrides);
   }
 
   if (resource.type === "cloud") {

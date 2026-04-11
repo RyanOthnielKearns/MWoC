@@ -34,11 +34,14 @@ export interface CloudSubscription {
   tier?: string; // e.g. "Pro", "Edu"
   renewalDate?: string; // ISO date
   rateLimitNotes?: string;
-  // Models discovered by probing the API
+  // webOnly: true means this is a chat subscription (claude.ai, chatgpt.com) with no API access.
+  // It can be tracked for awareness but cannot be probed or used by agents.
+  webOnly?: boolean;
+  // Models discovered by probing the API (not applicable for webOnly resources)
 }
 
-export interface RemoteRig {
-  type: "remote";
+export interface RemoteServer {
+  type: "server";
   name: string;
   backend: "vllm" | "sglang";
   endpoint: string; // base URL of the OpenAI-compatible API
@@ -50,7 +53,10 @@ export interface RemoteRig {
   // Models discovered by probing
 }
 
-export type Resource = LocalMachine | CloudSubscription | RemoteRig;
+/** @deprecated Use RemoteServer instead. Kept for backwards compatibility. */
+export type RemoteRig = RemoteServer;
+
+export type Resource = LocalMachine | CloudSubscription | RemoteServer;
 
 // --- Probed state ---
 
