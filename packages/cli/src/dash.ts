@@ -662,7 +662,10 @@ function buildHtml(port: number): string {
         }
         if (!evals.arenaELO && (!evals.hfEvals || evals.hfEvals.length === 0)) {
           if (!evals.hfModelId) {
-            capsHtml += '<div class="detail-empty">No HuggingFace match found for this model.</div>';
+            const ollamaLink = evals.ollamaLibraryUrl
+              ? ' <a href="' + esc(evals.ollamaLibraryUrl) + '" target="_blank">View on Ollama Library →</a>'
+              : '';
+            capsHtml += '<div class="detail-empty">No HuggingFace match found for this model.' + ollamaLink + '</div>';
           } else {
             capsHtml += '<div class="detail-empty">No eval results found on HuggingFace or Chatbot Arena.</div>';
           }

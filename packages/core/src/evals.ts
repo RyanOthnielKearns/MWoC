@@ -78,13 +78,17 @@ export async function fetchOllamaModelInfo(
         quantization_level?: string;
         format?: string;
       };
+      model_info?: Record<string, unknown>;
     };
     const d = data.details ?? {};
+    const mi = data.model_info ?? {};
     return {
       family: d.family ?? "unknown",
       parameterSize: d.parameter_size ?? "unknown",
       quantizationLevel: d.quantization_level ?? "unknown",
       format: d.format ?? "unknown",
+      architecture: typeof mi["general.architecture"] === "string" ? mi["general.architecture"] : undefined,
+      hfRepoId: typeof mi["general.base_model.0.repo_id"] === "string" ? mi["general.base_model.0.repo_id"] : undefined,
     };
   } catch {
     return null;
@@ -115,19 +119,25 @@ async function autoMatchHFId(
   const cached = loadIdMap()[modelId];
   if (cached) return cached;
 
-  // Build a search query from what we know
-  const parts: string[] = [];
-  if (ollamaInfo) {
-    if (ollamaInfo.family && ollamaInfo.family !== "unknown") parts.push(ollamaInfo.family);
-    if (ollamaInfo.parameterSize && ollamaInfo.parameterSize !== "unknown") {
-      parts.push(ollamaInfo.parameterSize);
-    }
+  // Option B: use GGUF-embedded repo ID when available — most reliable, no search needed
+  if (ollamaInfo?.hfRepoId) {
+    const entry: IdMapEntry = { hfId: ollamaInfo.hfRepoId, confidence: "exact" };
+    const map = loadIdMap();
+    map[modelId] = entry;
+    saveIdMap(map);
+    return entry;
   }
-  // Also parse the modelId itself (strip tag: e.g. "llama3.2:3b" → "llama3.2 3b")
-  const baseId = modelId.split(":")[0].replace(/[._-]+/g, " ");
-  const query = parts.length > 0
-    ? `${parts.join(" ")} instruct`
-    : `${baseId} instruct`;
+
+  // Option A: build a better HF search query using general.architecture.
+  // The architecture field (e.g. "gemma4", "llama3") is more specific than the
+  // family field and embeds the version number. Splitting on digit boundaries
+  // ("gemma4" → "gemma 4") produces queries that match HF's naming conventions.
+  // We intentionally omit parameterSize — Ollama reports actual GGUF byte count
+  // (e.g. "31.3B") which differs from the marketing name HF uses (e.g. "27b").
+  const arch = ollamaInfo?.architecture;
+  const baseId = modelId.split(":")[0];
+  const normName = (arch ?? baseId).replace(/([a-z])(\d)/g, "$1 $2");
+  const query = `${normName} instruct`;
 
   try {
     const url = new URL("https://huggingface.co/api/models");
@@ -296,6 +306,11 @@ export async function fetchModelEvals(
   // 1. Resolve HuggingFace ID
   let hfId: string | null = null;
   let hfMatchConfidence: ModelEvalData["hfMatchConfidence"] = "none";
+  // Option C: always provide an Ollama library link for local models so the
+  // UI has a useful fallback even when no HF match is found.
+  const ollamaLibraryUrl = resource.type === "local"
+    ? `https://ollama.com/library/${encodeURIComponent(modelId.split(":")[0])}`
+    : undefined;
 
   if (resource.type === "cloud") {
     const cloudMatch = lookupCloudHFId(modelId);
@@ -304,7 +319,7 @@ export async function fetchModelEvals(
       hfMatchConfidence = "exact";
     }
   } else if (resource.type === "local" || resource.type === "server") {
-    const endpoint = resource.type === "local" ? resource.endpoint : resource.endpoint;
+    const endpoint = resource.endpoint;
     const ollamaInfo = resource.type === "local"
       ? await fetchOllamaModelInfo(endpoint, modelId)
       : null;
@@ -315,10 +330,11 @@ export async function fetchModelEvals(
     }
   }
 
-  // 2. Check per-model cache (keyed on hfId or modelId if no hfId)
+  // 2. Check per-model cache (keyed on hfId or modelId if no hfId).
+  // ollamaLibraryUrl is always computable so we inject it rather than caching it.
   const cacheKey = hfId ?? modelId;
   const cached = loadEvalCache(cacheKey);
-  if (cached) return cached;
+  if (cached) return { ...cached, ollamaLibraryUrl };
 
   // 3. Fetch in parallel
   const [hfEvals, arenaELO] = await Promise.all([
@@ -331,6 +347,7 @@ export async function fetchModelEvals(
     hfMatchConfidence,
     hfEvals,
     arenaELO,
+    ollamaLibraryUrl,
     fetchedAt: new Date().toISOString(),
   };
 

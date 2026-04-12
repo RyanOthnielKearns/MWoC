@@ -90,6 +90,10 @@ export interface OllamaModelInfo {
   parameterSize: string;
   quantizationLevel: string;
   format: string;
+  /** general.architecture from GGUF metadata (e.g. "gemma4", "llama3") */
+  architecture?: string;
+  /** general.base_model.0.repo_id from GGUF metadata — direct HF repo ID when present */
+  hfRepoId?: string;
 }
 
 export interface HFEvalResult {
@@ -113,6 +117,8 @@ export interface ModelEvalData {
   hfEvals: HFEvalResult[];
   arenaELO: ArenaELOResult | null;
   fetchedAt: string;
+  /** Ollama library page URL for local models — always set regardless of HF match status */
+  ollamaLibraryUrl?: string;
 }
 
 // --- Bench types ---
