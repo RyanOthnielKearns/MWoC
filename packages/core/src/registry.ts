@@ -1,7 +1,9 @@
-import fs from "node:fs";
 import { STATE_FILE, loadResourcesConfig, ensureMwocDir } from "./config.js";
 import { probeResource } from "./probes.js";
 import { tierDescription } from "./tiers.js";
+import { TIER_ORDER } from "./types.js";
+import { readJson, writeJson } from "./utils/storage.js";
+import { formatAge } from "./utils/time.js";
 import type {
   CapabilityTier,
   ModelEntry,
@@ -12,19 +14,11 @@ import type {
 // --- State cache ---
 
 export function loadState(): StateCache | null {
-  if (!fs.existsSync(STATE_FILE)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as StateCache;
-  } catch {
-    return null;
-  }
+  return readJson(STATE_FILE, null);
 }
 
 function saveState(state: StateCache): void {
-  ensureMwocDir();
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), {
-    encoding: "utf-8",
-  });
+  writeJson(STATE_FILE, state);
 }
 
 // --- Core API ---
@@ -107,7 +101,7 @@ export function listModels(filter?: { tier?: CapabilityTier }): ModelEntry[] {
   const state = loadState();
   if (!state) return [];
 
-  const tierOrder = ["frontier", "mid", "local-large", "local-small"];
+  const tierOrder = TIER_ORDER;
 
   const allModels = state.resources
     .filter((r) => r.status === "available")
@@ -147,12 +141,7 @@ export function buildAgentSummary(): {
   stateAge?: string;
 } {
   const state = loadState();
-  const tierOrder: CapabilityTier[] = [
-    "frontier",
-    "mid",
-    "local-large",
-    "local-small",
-  ];
+  const tierOrder = TIER_ORDER;
 
   if (!state) {
     return {
@@ -183,12 +172,4 @@ export function buildAgentSummary(): {
   };
 }
 
-function formatAge(isoTimestamp: string): string {
-  const diffMs = Date.now() - new Date(isoTimestamp).getTime();
-  const mins = Math.floor(diffMs / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
-}
+// Removed duplicated formatAge utility

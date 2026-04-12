@@ -1,3 +1,4 @@
+import { longestPrefixMatch, sortedLongestPrefixMatch } from "./utils/matching.js";
 import type { CapabilityTier } from "./types.js";
 
 // Static default tier assignments for well-known model IDs.
@@ -74,6 +75,10 @@ const TIER_DESCRIPTIONS: Record<CapabilityTier, string> = {
     "Fast, low-memory, on-device. Use for classification, routing decisions, templating, and any task where speed matters more than depth.",
 };
 
+const SORTED_DEFAULT_TIER_MAP = [...DEFAULT_TIER_MAP].sort(
+  (a, b) => b.prefix.length - a.prefix.length
+);
+
 export function inferTier(
   modelId: string,
   overrides?: Record<string, CapabilityTier>
@@ -89,14 +94,9 @@ export function inferTier(
     }
   }
 
-  // Sort by prefix length descending so most specific match wins
-  const sorted = [...DEFAULT_TIER_MAP].sort(
-    (a, b) => b.prefix.length - a.prefix.length
-  );
-
-  for (const { prefix, tier } of sorted) {
-    if (normalized.startsWith(prefix.toLowerCase())) return tier;
-  }
+  // Use shared matching utility with pre-sorted map
+  const match = sortedLongestPrefixMatch(normalized, SORTED_DEFAULT_TIER_MAP.map(e => ({ prefix: e.prefix, value: e.tier })));
+  if (match) return match;
 
   // Unknown model — default to local-large (conservative)
   return "local-large";

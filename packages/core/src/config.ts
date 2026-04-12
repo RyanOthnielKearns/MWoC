@@ -1,8 +1,6 @@
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
-import yaml from "js-yaml";
+import { ensureDir, readJson, writeJson, readYaml, writeYaml } from "./utils/storage.js";
 import type { ResourcesConfig } from "./types.js";
+
 
 export const MWOC_DIR = path.join(os.homedir(), ".mwoc");
 export const AUTH_FILE = path.join(MWOC_DIR, "auth.json");
@@ -10,9 +8,7 @@ export const RESOURCES_FILE = path.join(MWOC_DIR, "resources.yaml");
 export const STATE_FILE = path.join(MWOC_DIR, "state.json");
 
 export function ensureMwocDir(): void {
-  if (!fs.existsSync(MWOC_DIR)) {
-    fs.mkdirSync(MWOC_DIR, { recursive: true, mode: 0o700 });
-  }
+  ensureDir(MWOC_DIR);
 }
 
 // --- Auth ---
@@ -25,17 +21,11 @@ export interface AuthConfig {
 }
 
 export function loadAuth(): AuthConfig {
-  if (!fs.existsSync(AUTH_FILE)) return {};
-  const raw = fs.readFileSync(AUTH_FILE, "utf-8");
-  return JSON.parse(raw) as AuthConfig;
+  return readJson(AUTH_FILE, {});
 }
 
 export function saveAuth(auth: AuthConfig): void {
-  ensureMwocDir();
-  fs.writeFileSync(AUTH_FILE, JSON.stringify(auth, null, 2), {
-    mode: 0o600,
-    encoding: "utf-8",
-  });
+  writeJson(AUTH_FILE, auth, { mode: 0o600 });
 }
 
 export function getApiKey(provider: string): string | undefined {
@@ -62,12 +52,9 @@ const DEFAULT_RESOURCES_CONFIG: ResourcesConfig = {
 };
 
 export function loadResourcesConfig(): ResourcesConfig {
-  if (!fs.existsSync(RESOURCES_FILE)) return DEFAULT_RESOURCES_CONFIG;
-  const raw = fs.readFileSync(RESOURCES_FILE, "utf-8");
-  return yaml.load(raw) as ResourcesConfig;
+  return readYaml(RESOURCES_FILE, DEFAULT_RESOURCES_CONFIG);
 }
 
 export function saveResourcesConfig(config: ResourcesConfig): void {
-  ensureMwocDir();
-  fs.writeFileSync(RESOURCES_FILE, yaml.dump(config), { encoding: "utf-8" });
+  writeYaml(RESOURCES_FILE, config);
 }

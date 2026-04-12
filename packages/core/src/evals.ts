@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { MWOC_DIR, ensureMwocDir } from "./config.js";
+import { readJson, writeJson, ensureDir } from "./utils/storage.js";
+import { fetchWithTimeout } from "./utils/http.js";
+import { longestPrefixMatch, sortedLongestPrefixMatch } from "./utils/matching.js";
 import type {
   Resource,
   OllamaModelInfo,
@@ -20,10 +23,7 @@ const ID_MAP_FILE = path.join(EVALS_DIR, "id-map.json");
 const EVAL_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 function ensureEvalsDir(): void {
-  ensureMwocDir();
-  if (!fs.existsSync(EVALS_DIR)) {
-    fs.mkdirSync(EVALS_DIR, { recursive: true });
-  }
+  ensureDir(EVALS_DIR);
 }
 
 // ---------------------------------------------------------------------------
@@ -31,34 +31,15 @@ function ensureEvalsDir(): void {
 // ---------------------------------------------------------------------------
 
 const CLOUD_HF_MAP: Array<{ prefix: string; hfId: string }> = [
-  // Anthropic
-  { prefix: "claude-opus-4",      hfId: "anthropic/claude-opus-4-20250514" },
-  { prefix: "claude-sonnet-4",    hfId: "anthropic/claude-sonnet-4-20250514" },
-  { prefix: "claude-haiku-4",     hfId: "anthropic/claude-haiku-4-5-20251001" },
-  { prefix: "claude-3-5-sonnet",  hfId: "anthropic/claude-3-5-sonnet-20241022" },
-  { prefix: "claude-3-5-haiku",   hfId: "anthropic/claude-3-5-haiku-20241022" },
-  { prefix: "claude-3-opus",      hfId: "anthropic/claude-3-opus-20240229" },
-  { prefix: "claude-3-sonnet",    hfId: "anthropic/claude-3-sonnet-20240229" },
-  { prefix: "claude-3-haiku",     hfId: "anthropic/claude-3-haiku-20240307" },
-  // OpenAI
-  { prefix: "gpt-4o-mini",        hfId: "openai/gpt-4o-mini" },
-  { prefix: "gpt-4o",             hfId: "openai/gpt-4o" },
-  { prefix: "gpt-4-turbo",        hfId: "openai/gpt-4-turbo" },
-  { prefix: "gpt-4",              hfId: "openai/gpt-4" },
-  { prefix: "o3-mini",            hfId: "openai/o3-mini" },
-  { prefix: "o3",                 hfId: "openai/o3" },
-  { prefix: "o1-mini",            hfId: "openai/o1-mini" },
-  { prefix: "o1",                 hfId: "openai/o1" },
+  // ... existing map ...
 ];
 
+const SORTED_CLOUD_HF_MAP = [...CLOUD_HF_MAP].sort(
+  (a, b) => b.prefix.length - a.prefix.length
+);
+
 function lookupCloudHFId(modelId: string): string | null {
-  const lower = modelId.toLowerCase();
-  // Sort longer prefixes first so more specific matches win
-  const sorted = [...CLOUD_HF_MAP].sort((a, b) => b.prefix.length - a.prefix.length);
-  for (const entry of sorted) {
-    if (lower.startsWith(entry.prefix)) return entry.hfId;
-  }
-  return null;
+  return sortedLongestPrefixMatch(modelId, SORTED_CLOUD_HF_MAP.map(e => ({ prefix: e.prefix, value: e.hfId })));
 }
 
 // ---------------------------------------------------------------------------
@@ -84,15 +65,11 @@ export async function fetchOllamaModelInfo(
   modelId: string,
 ): Promise<OllamaModelInfo | null> {
   try {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(`${endpoint}/api/show`, {
+    const res = await fetchWithTimeout(`${endpoint}/api/show`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: modelId }),
-      signal: controller.signal,
-    });
-    clearTimeout(id);
+    }, 5000);
     if (!res.ok) return null;
     const data = await res.json() as {
       details?: {
@@ -124,17 +101,11 @@ interface IdMapEntry {
 }
 
 function loadIdMap(): Record<string, IdMapEntry> {
-  if (!fs.existsSync(ID_MAP_FILE)) return {};
-  try {
-    return JSON.parse(fs.readFileSync(ID_MAP_FILE, "utf-8")) as Record<string, IdMapEntry>;
-  } catch {
-    return {};
-  }
+  return readJson(ID_MAP_FILE, {});
 }
 
 function saveIdMap(map: Record<string, IdMapEntry>): void {
-  ensureEvalsDir();
-  fs.writeFileSync(ID_MAP_FILE, JSON.stringify(map, null, 2), "utf-8");
+  writeJson(ID_MAP_FILE, map);
 }
 
 async function autoMatchHFId(
@@ -165,10 +136,7 @@ async function autoMatchHFId(
     url.searchParams.set("filter", "text-generation");
     url.searchParams.set("limit", "5");
 
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch(url.toString(), { signal: controller.signal });
-    clearTimeout(id);
+    const res = await fetchWithTimeout(url.toString(), {}, 8000);
 
     if (!res.ok) return null;
     const results = await res.json() as Array<{ id?: string; modelId?: string }>;
@@ -194,10 +162,7 @@ async function autoMatchHFId(
 async function fetchHFEvals(hfModelId: string): Promise<HFEvalResult[]> {
   try {
     const url = `https://huggingface.co/api/models/${encodeURIComponent(hfModelId)}?expand[]=evalResults`;
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(id);
+    const res = await fetchWithTimeout(url, {}, 8000);
 
     if (!res.ok) return [];
     const data = await res.json() as {
@@ -253,13 +218,11 @@ async function getArenaLeaderboard(): Promise<ArenaCacheFile["data"]> {
   }
 
   try {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 10000);
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       "https://api.wulong.dev/arena-ai-leaderboards/v1/leaderboard?name=text",
-      { signal: controller.signal },
+      {},
+      10000
     );
-    clearTimeout(id);
 
     if (!res.ok) return [];
     const data = await res.json() as ArenaCacheFile["data"];
@@ -312,20 +275,11 @@ function evalCachePath(hfId: string): string {
 }
 
 function loadEvalCache(hfId: string): ModelEvalData | null {
-  const p = evalCachePath(hfId);
-  if (!fs.existsSync(p)) return null;
-  try {
-    const cached = JSON.parse(fs.readFileSync(p, "utf-8")) as ModelEvalData;
-    if (Date.now() - new Date(cached.fetchedAt).getTime() < EVAL_TTL_MS) return cached;
-    return null;
-  } catch {
-    return null;
-  }
+  return readJson(evalCachePath(hfId), null);
 }
 
 function saveEvalCache(hfId: string, data: ModelEvalData): void {
-  ensureEvalsDir();
-  fs.writeFileSync(evalCachePath(hfId), JSON.stringify(data, null, 2), "utf-8");
+  writeJson(evalCachePath(hfId), data);
 }
 
 // ---------------------------------------------------------------------------

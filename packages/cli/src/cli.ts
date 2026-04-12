@@ -31,13 +31,17 @@ import type {
   BenchRun,
 } from "@mwoc/core";
 import { startDashboard } from "./dash.js";
+import { formatAge } from "@mwoc/core/utils/time";
+import { getResourceLabel, getResourceTypeLabel } from "@mwoc/core/utils/resources";
+import { fetchWithTimeout } from "@mwoc/core/utils/http";
 
 async function pingOllama(endpoint: string): Promise<boolean> {
   try {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`${endpoint}/api/tags`, { signal: controller.signal });
-    clearTimeout(id);
+    const res = await fetchWithTimeout(
+      `${endpoint}/api/tags`,
+      {},
+      3000
+    );
     return res.ok;
   } catch {
     return false;
@@ -89,22 +93,11 @@ program
             ? chalk.red("unavailable")
             : chalk.yellow("unknown");
 
-      const typeStr =
-        r.resource.type === "server"
-          ? "server"
-          : r.resource.type === "cloud" && r.resource.webOnly
-            ? "web sub"
-            : r.resource.type;
+      const typeStr = getResourceTypeLabel(r.resource);
       const notes =
         r.error && r.status !== "unknown"
           ? chalk.dim(r.error.slice(0, 40))
-          : r.resource.type === "local"
-            ? r.resource.endpoint
-            : r.resource.type === "server"
-              ? r.resource.endpoint
-              : r.resource.type === "cloud" && r.resource.webOnly
-                ? `${r.resource.provider} (web only)`
-                : r.resource.provider;
+          : getResourceLabel(r.resource);
 
       table.push([r.resource.name, typeStr, statusStr, r.models.length, notes]);
     }
@@ -247,14 +240,7 @@ resourceCmd.addCommand(
         return;
       }
       for (const r of config.resources) {
-        const detail =
-          r.type === "local"
-            ? r.endpoint
-            : r.type === "server"
-              ? r.endpoint
-              : r.type === "cloud" && r.webOnly
-                ? `${r.provider} (web only)`
-                : r.provider;
+        const detail = getResourceLabel(r);
         console.log(`  ${r.name.padEnd(24)} ${chalk.dim(r.type.padEnd(8))} ${chalk.dim(detail)}`);
       }
     })
@@ -974,12 +960,4 @@ program
 
 program.parse();
 
-function formatAge(isoTimestamp: string): string {
-  const diffMs = Date.now() - new Date(isoTimestamp).getTime();
-  const mins = Math.floor(diffMs / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
-}
+// Removed duplicated formatAge utility
