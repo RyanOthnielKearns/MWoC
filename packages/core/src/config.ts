@@ -1,3 +1,5 @@
+import path from "node:path";
+import os from "node:os";
 import { ensureDir, readJson, writeJson, readYaml, writeYaml } from "./utils/storage.js";
 import type { ResourcesConfig } from "./types.js";
 

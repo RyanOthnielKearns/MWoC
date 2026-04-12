@@ -26,7 +26,7 @@ export async function probeOllama(
   resource: LocalMachine,
   tierOverrides?: Record<string, string>
 ): Promise<ProbedResource> {
-  return wrapProbe(
+  return wrapProbe<ProbedResource>(
     async () => {
       const url = `${resource.endpoint.replace(/\/$/, "")}/api/tags`;
       const res = await fetchWithTimeout(url);
@@ -88,7 +88,7 @@ export async function probeRemoteServer(
   resource: RemoteServer,
   tierOverrides?: Record<string, string>
 ): Promise<ProbedResource> {
-  return wrapProbe(
+  return wrapProbe<ProbedResource>(
     async () => {
       const models = await probeOpenAICompatible(
         resource.endpoint,
@@ -139,7 +139,7 @@ export async function probeAnthropic(
     };
   }
 
-  return wrapProbe(
+  return wrapProbe<ProbedResource>(
     async () => {
       const res = await fetchWithTimeout("https://api.anthropic.com/v1/models", {
         headers: {
@@ -196,7 +196,7 @@ export async function probeOpenAI(
     };
   }
 
-  return wrapProbe(
+  return wrapProbe<ProbedResource>(
     async () => {
       const models = await probeOpenAICompatible(
         "https://api.openai.com",
