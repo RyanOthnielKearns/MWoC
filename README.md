@@ -17,15 +17,18 @@ MWoC maintains a structured index of all compute resources I have access to: loc
 ## Resource Types
 
 ### Local machine
+
 A machine running Ollama (or a compatible backend) locally. Models are discovered automatically by probing the Ollama API at startup.
 
 ### Cloud subscriptions
+
 Two distinct things that are easy to conflate:
 
 - **Web subscriptions** (Claude Pro, Claude Max, ChatGPT Plus/Edu) — tracked for human awareness; not directly queryable by agents
 - **API access** (Anthropic API, OpenAI API) — probeable, agent-usable; requires an API key stored in `~/.mwoc/auth.json`
 
 ### Remote servers
+
 Any machine you have network access to that runs an OpenAI-compatible inference API (vLLM, SGLang, etc.) — a shared GPU machine over VPN, a lab server, a home box you SSH into. Access method can be direct (VPN IP) or via SSH tunnel.
 
 ---
@@ -34,12 +37,12 @@ Any machine you have network access to that runs an OpenAI-compatible inference 
 
 Every model in the registry is tagged with a tier. These are used by agents to select the cheapest resource sufficient for a given subtask.
 
-| Tier | Description | Example use |
-|------|-------------|-------------|
-| `frontier` | Best available reasoning, long context, novel synthesis | Architecture decisions, complex debugging |
-| `mid` | Strong general-purpose at lower cost | Drafting, code generation, summarization |
-| `local-large` | On-device, no rate limits, moderate capability | Reformatting, structured extraction, iteration |
-| `local-small` | Fast, low memory, on-device | Classification, routing, templating |
+| Tier          | Description                                             | Example use                                    |
+| ------------- | ------------------------------------------------------- | ---------------------------------------------- |
+| `frontier`    | Best available reasoning, long context, novel synthesis | Architecture decisions, complex debugging      |
+| `mid`         | Strong general-purpose at lower cost                    | Drafting, code generation, summarization       |
+| `local-large` | On-device, no rate limits, moderate capability          | Reformatting, structured extraction, iteration |
+| `local-small` | Fast, low memory, on-device                             | Classification, routing, templating            |
 
 Tier assignments for well-known models are built in. They can be overridden per-resource in `~/.mwoc/resources.yaml`.
 
@@ -50,6 +53,11 @@ Tier assignments for well-known models are built in. They can be overridden per-
 Installed globally as `mwoc`. All configuration lives in `~/.mwoc/`.
 
 ```sh
+npm install
+npm run build
+#Link the CLI globally:
+# npm link --workspace=packages/cli
+
 mwoc init                        # first-run wizard
 mwoc probe                       # scan all resources, update state cache
 mwoc status                      # table of resources and availability
