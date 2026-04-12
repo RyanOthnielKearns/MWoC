@@ -39,7 +39,7 @@ import { startDashboard } from "./dash.js";
 async function pingOllama(endpoint: string): Promise<boolean> {
   try {
     const res = await fetchWithTimeout(
-      `${endpoint}/api/tags`,
+      `${endpoint.replace(/\/$/, "")}/api/tags`,
       {},
       3000
     );
@@ -358,6 +358,13 @@ resourceCmd.addCommand(
           console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
           return;
         }
+        const serverBackend = await select({
+          message: "Backend:",
+          choices: [
+            { value: "vllm",   name: "vLLM" },
+            { value: "sglang", name: "SGLang" },
+          ],
+        });
         const endpoint = await input({
           message: "Inference API endpoint URL:",
           default: "http://10.0.0.1:8000",
@@ -373,7 +380,7 @@ resourceCmd.addCommand(
         resource = {
           type: "server",
           name,
-          backend: "vllm",
+          backend: serverBackend as "vllm" | "sglang",
           endpoint,
           accessMethod: accessMethod as "direct" | "ssh-tunnel",
         };
