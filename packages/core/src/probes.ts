@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from "./utils/http.js";
+import { wrapProbe } from "./utils/common.js";
 import type {
   LocalMachine,
   CloudSubscription,
@@ -14,19 +16,6 @@ function timestamp(): string {
   return new Date().toISOString();
 }
 
-async function fetchWithTimeout(
-  url: string,
-  init: RequestInit = {}
-): Promise<Response> {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(id);
-  }
-}
-
 // --- Ollama probe ---
 
 interface OllamaTagsResponse {
@@ -37,33 +26,34 @@ export async function probeOllama(
   resource: LocalMachine,
   tierOverrides?: Record<string, string>
 ): Promise<ProbedResource> {
-  const url = `${resource.endpoint.replace(/\/$/, "")}/api/tags`;
-  try {
-    const res = await fetchWithTimeout(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as OllamaTagsResponse;
+  return wrapProbe(
+    async () => {
+      const url = `${resource.endpoint.replace(/\/$/, "")}/api/tags`;
+      const res = await fetchWithTimeout(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as OllamaTagsResponse;
 
-    const models: ModelEntry[] = data.models.map((m) => ({
-      modelId: m.name,
-      tier: inferTier(m.name, tierOverrides as Record<string, import("./types.js").CapabilityTier>),
-      description: `Ollama model: ${m.name}${m.details?.parameter_size ? ` (${m.details.parameter_size})` : ""}`,
-    }));
+      const models: ModelEntry[] = data.models.map((m) => ({
+        modelId: m.name,
+        tier: inferTier(m.name, tierOverrides as Record<string, import("./types.js").CapabilityTier>),
+        description: `Ollama model: ${m.name}${m.details?.parameter_size ? ` (${m.details.parameter_size})` : ""}`,
+      }));
 
-    return {
-      resource,
-      status: "available",
-      models,
-      probedAt: timestamp(),
-    };
-  } catch (err) {
-    return {
+      return {
+        resource,
+        status: "available",
+        models,
+        probedAt: timestamp(),
+      };
+    },
+    (err) => ({
       resource,
       status: "unavailable",
       models: [],
       probedAt: timestamp(),
       error: String(err),
-    };
-  }
+    })
+  );
 }
 
 // --- OpenAI-compatible probe (vLLM / SGLang / OpenAI / Anthropic via proxy) ---
@@ -98,23 +88,24 @@ export async function probeRemoteServer(
   resource: RemoteServer,
   tierOverrides?: Record<string, string>
 ): Promise<ProbedResource> {
-  try {
-    const models = await probeOpenAICompatible(
-      resource.endpoint,
-      undefined,
-      resource.name,
-      tierOverrides
-    );
-    return { resource, status: "available", models, probedAt: timestamp() };
-  } catch (err) {
-    return {
+  return wrapProbe(
+    async () => {
+      const models = await probeOpenAICompatible(
+        resource.endpoint,
+        undefined,
+        resource.name,
+        tierOverrides
+      );
+      return { resource, status: "available", models, probedAt: timestamp() };
+    },
+    (err) => ({
       resource,
       status: "unavailable",
       models: [],
       probedAt: timestamp(),
       error: String(err),
-    };
-  }
+    })
+  );
 }
 
 // --- Anthropic probe ---
@@ -148,33 +139,34 @@ export async function probeAnthropic(
     };
   }
 
-  try {
-    const res = await fetchWithTimeout("https://api.anthropic.com/v1/models", {
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as AnthropicModelsResponse;
+  return wrapProbe(
+    async () => {
+      const res = await fetchWithTimeout("https://api.anthropic.com/v1/models", {
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as AnthropicModelsResponse;
 
-    const models: ModelEntry[] = data.data.map((m) => ({
-      modelId: m.id,
-      tier: inferTier(m.id, tierOverrides as Record<string, import("./types.js").CapabilityTier>),
-      contextWindow: m.context_window,
-      description: `Anthropic (${resource.tier ?? "subscription"}): ${m.id}`,
-    }));
+      const models: ModelEntry[] = data.data.map((m) => ({
+        modelId: m.id,
+        tier: inferTier(m.id, tierOverrides as Record<string, import("./types.js").CapabilityTier>),
+        contextWindow: m.context_window,
+        description: `Anthropic (${resource.tier ?? "subscription"}): ${m.id}`,
+      }));
 
-    return { resource, status: "available", models, probedAt: timestamp() };
-  } catch (err) {
-    return {
+      return { resource, status: "available", models, probedAt: timestamp() };
+    },
+    (err) => ({
       resource,
       status: "unavailable",
       models: [],
       probedAt: timestamp(),
       error: String(err),
-    };
-  }
+    })
+  );
 }
 
 // --- OpenAI probe ---
@@ -204,23 +196,24 @@ export async function probeOpenAI(
     };
   }
 
-  try {
-    const models = await probeOpenAICompatible(
-      "https://api.openai.com",
-      apiKey,
-      resource.name,
-      tierOverrides
-    );
-    return { resource, status: "available", models, probedAt: timestamp() };
-  } catch (err) {
-    return {
+  return wrapProbe(
+    async () => {
+      const models = await probeOpenAICompatible(
+        "https://api.openai.com",
+        apiKey,
+        resource.name,
+        tierOverrides
+      );
+      return { resource, status: "available", models, probedAt: timestamp() };
+    },
+    (err) => ({
       resource,
       status: "unavailable",
       models: [],
       probedAt: timestamp(),
       error: String(err),
-    };
-  }
+    })
+  );
 }
 
 // --- Dispatch ---
