@@ -21,6 +21,10 @@ import {
   loadBenchRun,
   overallMeanToksPerSec,
   BENCH_DIR,
+  formatAge,
+  getResourceLabel,
+  getResourceTypeLabel,
+  fetchWithTimeout,
 } from "@mwoc/core";
 import type {
   CapabilityTier,
@@ -31,9 +35,6 @@ import type {
   BenchRun,
 } from "@mwoc/core";
 import { startDashboard } from "./dash.js";
-import { formatAge } from "@mwoc/core/utils/time";
-import { getResourceLabel, getResourceTypeLabel } from "@mwoc/core/utils/resources";
-import { fetchWithTimeout } from "@mwoc/core/utils/http";
 
 async function pingOllama(endpoint: string): Promise<boolean> {
   try {

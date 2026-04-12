@@ -6,3 +6,6 @@ export * from "./registry.js";
 export * from "./evals.js";
 export * from "./bench.js";
 export * from "./bench-store.js";
+export { formatAge } from "./utils/time.js";
+export { getResourceLabel, getResourceTypeLabel } from "./utils/resources.js";
+export { fetchWithTimeout } from "./utils/http.js";
