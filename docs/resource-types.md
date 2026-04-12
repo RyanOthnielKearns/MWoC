@@ -6,9 +6,11 @@ MWoC tracks three kinds of resources. All are declared in `~/.mwoc/resources.yam
 
 ## Local machine
 
-A machine running [Ollama](https://ollama.com) locally. Models are discovered automatically by probing the Ollama API — you don't declare them by hand.
+A machine running a local inference backend — [Ollama](https://ollama.com), [vLLM](https://docs.vllm.ai), or [SGLang](https://sglang.readthedocs.io). Models are discovered automatically by probing the backend's API — you don't declare them by hand.
 
-**YAML:**
+**YAML examples:**
+
+Ollama (default port 11434):
 ```yaml
 - type: local
   name: local-ollama
@@ -17,14 +19,31 @@ A machine running [Ollama](https://ollama.com) locally. Models are discovered au
   hardwareNotes: "M3 Max, 128GB RAM"   # optional, for your reference
 ```
 
+vLLM (default port 8000):
+```yaml
+- type: local
+  name: local-vllm
+  backend: vllm
+  endpoint: http://localhost:8000
+  hardwareNotes: "RTX 4090, 24GB VRAM"   # optional, for your reference
+```
+
+SGLang (default port 8000):
+```yaml
+- type: local
+  name: local-sglang
+  backend: sglang
+  endpoint: http://localhost:8000
+```
+
 **Fields:**
 
 | Field | Required | Description |
 |---|---|---|
 | `type` | yes | Must be `local` |
 | `name` | yes | Unique name used in CLI commands |
-| `backend` | yes | Must be `ollama` (only supported local backend) |
-| `endpoint` | yes | Base URL of the Ollama server |
+| `backend` | yes | `ollama`, `vllm`, or `sglang` |
+| `endpoint` | yes | Base URL of the inference server |
 | `hardwareNotes` | no | Free-text notes for your reference |
 
 ---

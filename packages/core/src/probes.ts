@@ -224,6 +224,26 @@ export async function probeResource(
 ): Promise<ProbedResource> {
   if (resource.type === "local") {
     if (resource.backend === "ollama") return probeOllama(resource, tierOverrides);
+    if (resource.backend === "vllm" || resource.backend === "sglang") {
+      return wrapProbe<ProbedResource>(
+        async () => {
+          const models = await probeOpenAICompatible(
+            resource.endpoint,
+            undefined,
+            resource.name,
+            tierOverrides
+          );
+          return { resource, status: "available", models, probedAt: timestamp() };
+        },
+        (err) => ({
+          resource,
+          status: "unavailable",
+          models: [],
+          probedAt: timestamp(),
+          error: String(err),
+        })
+      );
+    }
     return {
       resource,
       status: "unknown",

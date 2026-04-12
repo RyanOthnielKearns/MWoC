@@ -21,7 +21,7 @@ export interface ModelEntry {
 export interface LocalMachine {
   type: "local";
   name: string;
-  backend: "ollama";
+  backend: "ollama" | "vllm" | "sglang";
   endpoint: string; // e.g. http://localhost:11434
   hardwareNotes?: string;
   // Models are discovered by probing, not declared statically

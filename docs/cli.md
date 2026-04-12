@@ -180,7 +180,7 @@ mwoc bench --compare <id1> <id2>
 | `--list` | — | List saved bench runs |
 | `--compare <id1> <id2>` | — | Compare two saved runs side-by-side |
 
-`mwoc bench` only works with `type: local` (Ollama) resources. Cloud and server resources are not supported — the command exits with a clear error if a non-local resource is named.
+`mwoc bench` only works with Ollama-backed local resources (`type: local`, `backend: ollama`). vLLM, SGLang, cloud, and server resources are not supported — the command exits with a clear error if a non-Ollama resource is named.
 
 If `--model` is omitted and more than 3 models exist on the resource, you are asked to confirm before proceeding.
 

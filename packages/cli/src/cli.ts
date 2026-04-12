@@ -39,7 +39,20 @@ import { startDashboard } from "./dash.js";
 async function pingOllama(endpoint: string): Promise<boolean> {
   try {
     const res = await fetchWithTimeout(
-      `${endpoint}/api/tags`,
+      `${endpoint.replace(/\/$/, "")}/api/tags`,
+      {},
+      3000
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function pingOpenAICompatible(endpoint: string): Promise<boolean> {
+  try {
+    const res = await fetchWithTimeout(
+      `${endpoint.replace(/\/$/, "")}/v1/models`,
       {},
       3000
     );
@@ -257,7 +270,7 @@ resourceCmd.addCommand(
       const type = await select({
         message: "Resource type:",
         choices: [
-          { value: "local",  name: "Local machine  (Ollama)" },
+          { value: "local",  name: "Local machine  (Ollama / vLLM / SGLang)" },
           { value: "cloud",  name: "Cloud provider (Anthropic, OpenAI, …)" },
           { value: "server", name: "Remote server  (vLLM / SGLang over VPN or SSH)" },
         ],
@@ -266,19 +279,29 @@ resourceCmd.addCommand(
       let resource: Resource;
 
       if (type === "local") {
+        const backend = await select({
+          message: "Backend:",
+          choices: [
+            { value: "ollama", name: "Ollama" },
+            { value: "vllm",   name: "vLLM" },
+            { value: "sglang", name: "SGLang" },
+          ],
+        });
+        const defaultEndpoint = backend === "ollama" ? "http://localhost:11434" : "http://localhost:8000";
+        const defaultName = backend === "ollama" ? "local-ollama" : backend === "vllm" ? "local-vllm" : "local-sglang";
         const endpoint = await input({
-          message: "Ollama endpoint:",
-          default: "http://localhost:11434",
+          message: `${(backend as string).toUpperCase()} endpoint:`,
+          default: defaultEndpoint,
         });
         const name = await input({
           message: "Name for this resource:",
-          default: "local-ollama",
+          default: defaultName,
         });
         if (existingNames.has(name)) {
           console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
           return;
         }
-        resource = { type: "local", name, backend: "ollama", endpoint };
+        resource = { type: "local", name, backend: backend as "ollama" | "vllm" | "sglang", endpoint };
 
       } else if (type === "cloud") {
         const provider = await input({
@@ -335,6 +358,13 @@ resourceCmd.addCommand(
           console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
           return;
         }
+        const serverBackend = await select({
+          message: "Backend:",
+          choices: [
+            { value: "vllm",   name: "vLLM" },
+            { value: "sglang", name: "SGLang" },
+          ],
+        });
         const endpoint = await input({
           message: "Inference API endpoint URL:",
           default: "http://10.0.0.1:8000",
@@ -350,7 +380,7 @@ resourceCmd.addCommand(
         resource = {
           type: "server",
           name,
-          backend: "vllm",
+          backend: serverBackend as "vllm" | "sglang",
           endpoint,
           accessMethod: accessMethod as "direct" | "ssh-tunnel",
         };
@@ -415,49 +445,77 @@ program
 
     const resources: Resource[] = [];
 
-    // --- Local Ollama ---
+    // --- Local machine ---
     console.log(chalk.bold("Local machine"));
-    const OLLAMA_DEFAULT = "http://localhost:11434";
-    process.stdout.write(chalk.dim(`Checking for Ollama at ${OLLAMA_DEFAULT}... `));
-    const ollamaFound = await pingOllama(OLLAMA_DEFAULT);
+    const localBackend = await select({
+      message: "What local inference backend are you running?",
+      choices: [
+        { value: "ollama", name: "Ollama" },
+        { value: "vllm",   name: "vLLM" },
+        { value: "sglang", name: "SGLang" },
+        { value: "none",   name: "None / skip" },
+      ],
+    });
 
-    if (ollamaFound) {
-      console.log(chalk.green("found"));
-      const addOllama = await select({
-        message: "Add it to MWoC?",
-        choices: [
-          { value: true, name: "Yes" },
-          { value: false, name: "No" },
-        ],
-      });
-      if (addOllama) {
-        resources.push({
-          type: "local",
-          name: "local-ollama",
-          backend: "ollama",
-          endpoint: OLLAMA_DEFAULT,
+    if (localBackend === "ollama") {
+      const OLLAMA_DEFAULT = "http://localhost:11434";
+      process.stdout.write(chalk.dim(`Checking for Ollama at ${OLLAMA_DEFAULT}... `));
+      const ollamaFound = await pingOllama(OLLAMA_DEFAULT);
+
+      if (ollamaFound) {
+        console.log(chalk.green("found"));
+        const addOllama = await select({
+          message: "Add it to MWoC?",
+          choices: [
+            { value: true, name: "Yes" },
+            { value: false, name: "No" },
+          ],
         });
+        if (addOllama) {
+          resources.push({
+            type: "local",
+            name: "local-ollama",
+            backend: "ollama",
+            endpoint: OLLAMA_DEFAULT,
+          });
+        }
+      } else {
+        console.log(chalk.dim("not found"));
+        const ollamaElsewhere = await select({
+          message: "Is Ollama running at a different address?",
+          choices: [
+            { value: true, name: "Yes" },
+            { value: false, name: "No" },
+          ],
+        });
+        if (ollamaElsewhere) {
+          const endpoint = await input({
+            message: "Ollama endpoint:",
+            default: OLLAMA_DEFAULT,
+          });
+          const name = await input({
+            message: "Name for this resource:",
+            default: "local-ollama",
+          });
+          resources.push({ type: "local", name, backend: "ollama", endpoint });
+        }
       }
-    } else {
-      console.log(chalk.dim("not found"));
-      const ollamaElsewhere = await select({
-        message: "Is Ollama running at a different address?",
-        choices: [
-          { value: true, name: "Yes" },
-          { value: false, name: "No" },
-        ],
+    } else if (localBackend === "vllm" || localBackend === "sglang") {
+      const defaultEndpoint = "http://localhost:8000";
+      const defaultName = localBackend === "vllm" ? "local-vllm" : "local-sglang";
+      process.stdout.write(chalk.dim(`Checking for ${localBackend.toUpperCase()} at ${defaultEndpoint}... `));
+      const found = await pingOpenAICompatible(defaultEndpoint);
+      console.log(found ? chalk.green("found") : chalk.dim("not found"));
+
+      const endpoint = await input({
+        message: `${localBackend.toUpperCase()} endpoint:`,
+        default: defaultEndpoint,
       });
-      if (ollamaElsewhere) {
-        const endpoint = await input({
-          message: "Ollama endpoint:",
-          default: OLLAMA_DEFAULT,
-        });
-        const name = await input({
-          message: "Name for this resource:",
-          default: "local-ollama",
-        });
-        resources.push({ type: "local", name, backend: "ollama", endpoint });
-      }
+      const name = await input({
+        message: "Name for this resource:",
+        default: defaultName,
+      });
+      resources.push({ type: "local", name, backend: localBackend, endpoint });
     }
 
     // --- Anthropic ---
