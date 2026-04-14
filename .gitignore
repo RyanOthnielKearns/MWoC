@@ -5,3 +5,5 @@ dist/
 
 # Files for local testing and development
 reference/
+.env
+.env.local
