@@ -2,6 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import Table from "cli-table3";
 import { input, password, select } from "@inquirer/prompts";
+import { ExitPromptError } from "@inquirer/core";
 import {
   probeAll,
   listModels,
@@ -25,6 +26,7 @@ import {
   getResourceLabel,
   getResourceTypeLabel,
   fetchWithTimeout,
+  fetchGpuState,
 } from "@mwoc/core";
 import type {
   CapabilityTier,
@@ -35,6 +37,70 @@ import type {
   BenchRun,
 } from "@mwoc/core";
 import { startDashboard } from "./dash.js";
+
+// ── SIGINT handling for graceful exit mid-flow ──────────────────────────────
+// Two SIGINTs in succession exit the CLI; first cancels the current prompt
+let sigintCount = 0;
+
+// Track if we're in a prompt (for SIGINT counting across prompts)
+let inPrompt = false;
+
+// Global SIGINT handler - counts presses and triggers exits
+process.on("SIGINT", () => {
+  sigintCount++;
+  if (sigintCount === 1) {
+    // First SIGINT: let the prompt cancel normally
+    // The wrapPrompt function will catch the ExitPromptError
+    console.log(); // Show the ^C character
+  } else {
+    // Second SIGINT: exit immediately
+    console.log(); // Add newline after ^
+    process.exit(0);
+  }
+});
+
+// Custom error to exit the flow gracefully
+class CancelFlowError extends Error {
+  constructor() {
+    super("Flow cancelled");
+    this.name = "CancelFlowError";
+  }
+}
+
+// Wrap inquirer prompts to handle ExitPromptError gracefully
+async function wrapPrompt<T>(promptFn: () => Promise<T>): Promise<T> {
+  try {
+    inPrompt = true;
+    return await promptFn();
+  } catch (err) {
+    if (err instanceof ExitPromptError) {
+      // User pressed Ctrl+C during prompt
+      // First SIGINT: exit the flow gracefully
+      // Second SIGINT during another prompt: exit the app
+      if (sigintCount >= 2) {
+        process.exit(0);
+      }
+      // Throw custom error to exit the flow gracefully
+      throw new CancelFlowError();
+    }
+    throw err;
+  } finally {
+    inPrompt = false;
+  }
+}
+
+// Handle CancelFlowError at the top level of commands with prompts
+async function runFlow<T>(fn: () => Promise<T>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    if (err instanceof CancelFlowError) {
+      // Exit gracefully without stack trace
+      process.exit(0);
+    }
+    throw err;
+  }
+}
 
 async function pingOllama(endpoint: string): Promise<boolean> {
   try {
@@ -69,6 +135,11 @@ const TIER_COLORS: Record<CapabilityTier, chalk.Chalk> = {
   "local-small": chalk.gray,
 };
 
+function utilBar(pct: number): string {
+  const filled = Math.round(pct / 10);
+  return chalk.green("█".repeat(filled)) + chalk.dim("░".repeat(10 - filled));
+}
+
 const program = new Command();
 
 program
@@ -80,7 +151,7 @@ program
 program
   .command("status")
   .description("Show all resources and their current availability")
-  .action(() => {
+  .action(async () => {
     const state = getResourceState();
     if (!state) {
       console.log(
@@ -109,14 +180,50 @@ program
 
       const typeStr = getResourceTypeLabel(r.resource);
       const notes =
-        r.error && r.status !== "unknown"
-          ? chalk.dim(r.error.slice(0, 40))
-          : getResourceLabel(r.resource);
+        r.inferenceStatus === "offline"
+          ? chalk.yellow("inference offline")
+          : r.error && r.status !== "unknown"
+            ? chalk.dim(r.error.slice(0, 40))
+            : getResourceLabel(r.resource);
 
       table.push([r.resource.name, typeStr, statusStr, r.models.length, notes]);
     }
 
     console.log(table.toString());
+
+    // GPU stats for server resources with gpuMonitor configured
+    const gpuServers = state.resources.filter(
+      (r) => r.resource.type === "server" && (r.resource as RemoteServer).gpuMonitor
+    );
+    if (gpuServers.length > 0) {
+      console.log();
+      for (const r of gpuServers) {
+        const gpuState = await fetchGpuState(r.resource as RemoteServer);
+        if (!gpuState) {
+          console.log(chalk.dim(`  ${r.resource.name}: GPU data unavailable`));
+          continue;
+        }
+        const stale = Date.now() - new Date(gpuState.updatedAt).getTime() > 5 * 60 * 1000;
+        const ageFmt = formatAge(gpuState.updatedAt);
+        const freeCount = gpuState.gpus.filter((g) => g.free).length;
+        const staleFlag = stale ? chalk.yellow(" [stale]") : "";
+        const gpuName = gpuState.gpus[0]?.name ?? "GPU";
+        console.log(
+          `  ${chalk.bold(r.resource.name)}  GPUs: ${gpuState.gpus.length}× ${gpuName}  |  ${freeCount} free  |  updated ${ageFmt}${staleFlag}`
+        );
+        for (const g of gpuState.gpus) {
+          const memUsed = (g.memory_used / 1024).toFixed(1);
+          const memTotal = Math.round(g.memory_total / 1024);
+          const statusStr = g.free ? chalk.green("free") : chalk.yellow("in use");
+          console.log(
+            chalk.dim(`    GPU ${g.index}  `) +
+            utilBar(g.utilization) +
+            chalk.dim(`  ${String(g.utilization).padStart(3)}%  ${memUsed}/${memTotal} GB  `) +
+            statusStr
+          );
+        }
+      }
+    }
   });
 
 // --- mwoc models ---
@@ -164,7 +271,8 @@ program
   .command("probe")
   .description("Re-probe all resources and update state cache")
   .option("--resource <name>", "Probe only a specific resource by name")
-  .action(async (opts: { resource?: string }) => {
+  .option("--verbose", "Show full error details and hints for unavailable resources")
+  .action(async (opts: { resource?: string; verbose?: boolean }) => {
     console.log(chalk.dim("Probing resources..."));
     const state = await probeAll(
       opts.resource ? { resourceName: opts.resource } : undefined
@@ -174,10 +282,30 @@ program
     let unavailable = 0;
     for (const r of state.resources) {
       const icon = r.status === "available" ? chalk.green("✓") : chalk.red("✗");
-      const modelCount =
-        r.status === "available" ? chalk.dim(` (${r.models.length} models)`) : "";
-      const err = r.error ? chalk.dim(` — ${r.error.slice(0, 60)}`) : "";
+      const inferenceNote = r.inferenceStatus === "offline"
+        ? chalk.yellow(" (inference offline)")
+        : "";
+      const modelCount = r.status === "available"
+        ? chalk.dim(` (${r.models.length} model${r.models.length !== 1 ? "s" : ""})`) + inferenceNote
+        : "";
+      const err = r.error
+        ? chalk.dim(` — ${opts.verbose ? r.error : r.error.slice(0, 60)}`)
+        : "";
       console.log(`  ${icon} ${r.resource.name}${modelCount}${err}`);
+
+      if (opts.verbose && r.status !== "available") {
+        const res = r.resource;
+        if (res.type === "server" || res.type === "local") {
+          console.log(chalk.dim(`       endpoint: ${(res as { endpoint: string }).endpoint}`));
+        }
+        if (res.type === "server" && (res as RemoteServer).accessMethod === "ssh-tunnel") {
+          const srv = res as RemoteServer;
+          console.log(
+            chalk.yellow(`       hint: SSH host unreachable — check VPN/network access to ${srv.sshHost ?? "host"}`)
+          );
+        }
+      }
+
       if (r.status === "available") available++;
       else unavailable++;
     }
@@ -197,11 +325,18 @@ authCmd.addCommand(
     .description("Add or rotate a credential for a provider")
     .argument("<provider>", "Provider name (e.g. anthropic, openai)")
     .action(async (provider: string) => {
-      const key = await password({ message: `API key for ${provider}:` });
-      const auth = loadAuth();
-      auth[provider] = { ...auth[provider], apiKey: key.trim() };
-      saveAuth(auth);
-      console.log(chalk.green(`✓ Saved API key for ${provider} to ${AUTH_FILE}`));
+      try {
+        const key = await wrapPrompt(() => password({ message: `API key for ${provider}:` }));
+        const auth = loadAuth();
+        auth[provider] = { ...auth[provider], apiKey: key.trim() };
+        saveAuth(auth);
+        console.log(chalk.green(`✓ Saved API key for ${provider} to ${AUTH_FILE}`));
+      } catch (err) {
+        if (err instanceof CancelFlowError) {
+          process.exit(0);
+        }
+        throw err;
+      }
     })
 );
 
@@ -267,134 +402,190 @@ resourceCmd.addCommand(
       const config = loadResourcesConfig();
       const existingNames = new Set(config.resources.map((r) => r.name));
 
-      const type = await select({
-        message: "Resource type:",
-        choices: [
-          { value: "local",  name: "Local machine  (Ollama / vLLM / SGLang)" },
-          { value: "cloud",  name: "Cloud provider (Anthropic, OpenAI, …)" },
-          { value: "server", name: "Remote server  (vLLM / SGLang over VPN or SSH)" },
-        ],
-      });
+      try {
+        const type = await wrapPrompt(() =>
+          select({
+            message: "Resource type:",
+            choices: [
+              { value: "local",  name: "Local machine  (Ollama / vLLM / SGLang)" },
+              { value: "cloud",  name: "Cloud provider (Anthropic, OpenAI, …)" },
+              { value: "server", name: "Remote server  (vLLM / SGLang over VPN or SSH)" },
+            ],
+          })
+        );
 
-      let resource: Resource;
+        let resource: Resource;
 
-      if (type === "local") {
-        const backend = await select({
-          message: "Backend:",
-          choices: [
-            { value: "ollama", name: "Ollama" },
-            { value: "vllm",   name: "vLLM" },
-            { value: "sglang", name: "SGLang" },
-          ],
-        });
-        const defaultEndpoint = backend === "ollama" ? "http://localhost:11434" : "http://localhost:8000";
-        const defaultName = backend === "ollama" ? "local-ollama" : backend === "vllm" ? "local-vllm" : "local-sglang";
-        const endpoint = await input({
-          message: `${(backend as string).toUpperCase()} endpoint:`,
-          default: defaultEndpoint,
-        });
-        const name = await input({
-          message: "Name for this resource:",
-          default: defaultName,
-        });
-        if (existingNames.has(name)) {
-          console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
-          return;
-        }
-        resource = { type: "local", name, backend: backend as "ollama" | "vllm" | "sglang", endpoint };
-
-      } else if (type === "cloud") {
-        const provider = await input({
-          message: "Provider (e.g. anthropic, openai, google):",
-          default: "anthropic",
-        });
-        const accessKind = await select({
-          message: "Access type:",
-          choices: [
-            { value: "api",     name: "API key" },
-            { value: "web",     name: "Web subscription (claude.ai, chatgpt.com, …)" },
-          ],
-        });
-
-        if (accessKind === "web") {
-          const tier = await input({
-            message: "Subscription tier (e.g. Pro, Max, Plus, Edu):",
-            default: "Pro",
-          });
-          const name = await input({
-            message: "Name for this resource:",
-            default: `${provider}-${tier.toLowerCase()}`,
-          });
+        if (type === "local") {
+          const backend = await wrapPrompt(() =>
+            select({
+              message: "Backend:",
+              choices: [
+                { value: "ollama", name: "Ollama" },
+                { value: "vllm",   name: "vLLM" },
+                { value: "sglang", name: "SGLang" },
+              ],
+            })
+          );
+          const defaultEndpoint = backend === "ollama" ? "http://localhost:11434" : "http://localhost:8000";
+          const defaultName = backend === "ollama" ? "local-ollama" : backend === "vllm" ? "local-vllm" : "local-sglang";
+          const endpoint = await wrapPrompt(() =>
+            input({
+              message: `${(backend as string).toUpperCase()} endpoint:`,
+              default: defaultEndpoint,
+            })
+          );
+          const name = await wrapPrompt(() =>
+            input({
+              message: "Name for this resource:",
+              default: defaultName,
+            })
+          );
           if (existingNames.has(name)) {
             console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
             return;
           }
-          resource = { type: "cloud", name, provider, tier, webOnly: true };
+          resource = { type: "local", name, backend: backend as "ollama" | "vllm" | "sglang", endpoint };
+
+        } else if (type === "cloud") {
+          const provider = await wrapPrompt(() =>
+            input({
+              message: "Provider (e.g. anthropic, openai, google):",
+              default: "anthropic",
+            })
+          );
+          const accessKind = await wrapPrompt(() =>
+            select({
+              message: "Access type:",
+              choices: [
+                { value: "api",     name: "API key" },
+                { value: "web",     name: "Web subscription (claude.ai, chatgpt.com, …)" },
+              ],
+            })
+          );
+
+          if (accessKind === "web") {
+            const tier = await wrapPrompt(() =>
+              input({
+                message: "Subscription tier (e.g. Pro, Max, Plus, Edu):",
+                default: "Pro",
+              })
+            );
+            const name = await wrapPrompt(() =>
+              input({
+                message: "Name for this resource:",
+                default: `${provider}-${tier.toLowerCase()}`,
+              })
+            );
+            if (existingNames.has(name)) {
+              console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
+              return;
+            }
+            resource = { type: "cloud", name, provider, tier, webOnly: true };
+          } else {
+            const key = await wrapPrompt(() =>
+              password({ message: `API key for ${provider}:` })
+            );
+            const auth = loadAuth();
+            auth[provider] = { ...auth[provider], apiKey: key.trim() };
+            saveAuth(auth);
+            console.log(chalk.green(`✓ Saved API key for ${provider} to ${AUTH_FILE}`));
+
+            const name = await wrapPrompt(() =>
+              input({
+                message: "Name for this resource:",
+                default: `${provider}-api`,
+              })
+            );
+            if (existingNames.has(name)) {
+              console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
+              return;
+            }
+            resource = { type: "cloud", name, provider, tier: "API" };
+          }
+
         } else {
-          const key = await password({ message: `API key for ${provider}:` });
-          const auth = loadAuth();
-          auth[provider] = { ...auth[provider], apiKey: key.trim() };
-          saveAuth(auth);
-          console.log(chalk.green(`✓ Saved API key for ${provider} to ${AUTH_FILE}`));
-
-          const name = await input({
-            message: "Name for this resource:",
-            default: `${provider}-api`,
-          });
+          // server
+          const name = await wrapPrompt(() =>
+            input({
+              message: "Name for this server:",
+              default: "gpu-server",
+            })
+          );
           if (existingNames.has(name)) {
             console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
             return;
           }
-          resource = { type: "cloud", name, provider, tier: "API" };
+          const serverBackend = await wrapPrompt(() =>
+            select({
+              message: "Backend:",
+              choices: [
+                { value: "vllm",   name: "vLLM" },
+                { value: "sglang", name: "SGLang" },
+              ],
+            })
+          );
+          const endpoint = await wrapPrompt(() =>
+            input({
+              message: "Inference API endpoint URL:",
+              default: "http://10.0.0.1:8000",
+            })
+          );
+          const accessMethod = await wrapPrompt(() =>
+            select({
+              message: "How do you reach it?",
+              choices: [
+                { value: "direct",     name: "Direct — reachable over VPN or private network" },
+                { value: "ssh-tunnel", name: "SSH tunnel — forward the port locally first" },
+              ],
+            })
+          );
+
+          resource = {
+            type: "server",
+            name,
+            backend: serverBackend as "vllm" | "sglang",
+            endpoint,
+            accessMethod: accessMethod as "direct" | "ssh-tunnel",
+          };
+
+          if (accessMethod === "ssh-tunnel") {
+            (resource as RemoteServer).sshHost = await wrapPrompt(() => input({ message: "SSH hostname or IP:" }));
+            (resource as RemoteServer).sshUser = await wrapPrompt(() => input({ message: "SSH username:" }));
+          }
+
+          const addGpuMonitor = await wrapPrompt(() =>
+            select({
+              message: "Configure GPU monitoring? (reads live stats from Upstash Redis)",
+              choices: [
+                { value: "no",  name: "No" },
+                { value: "yes", name: "Yes" },
+              ],
+            })
+          );
+          if (addGpuMonitor === "yes") {
+            const redisRestUrl = await wrapPrompt(() => input({ message: "Redis REST URL:" }));
+            const redisRestToken = await wrapPrompt(() => password({ message: "Redis REST token:" }));
+            const stateKey = await wrapPrompt(() => input({ message: "Redis state key:", default: "gpu:state" }));
+            (resource as RemoteServer).gpuMonitor = {
+              redisRestUrl: redisRestUrl.trim(),
+              redisRestToken: redisRestToken.trim(),
+              stateKey,
+            };
+          }
         }
 
-      } else {
-        // server
-        const name = await input({
-          message: "Name for this server:",
-          default: "gpu-server",
-        });
-        if (existingNames.has(name)) {
-          console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
-          return;
+        config.resources.push(resource);
+        saveResourcesConfig(config);
+        console.log(chalk.green(`✓ Added "${resource.name}" to ${RESOURCES_FILE}`));
+        console.log(chalk.dim("Run `mwoc probe` to scan it now."));
+      } catch (err) {
+        if (err instanceof CancelFlowError) {
+          // Exit gracefully without stack trace
+          process.exit(0);
         }
-        const serverBackend = await select({
-          message: "Backend:",
-          choices: [
-            { value: "vllm",   name: "vLLM" },
-            { value: "sglang", name: "SGLang" },
-          ],
-        });
-        const endpoint = await input({
-          message: "Inference API endpoint URL:",
-          default: "http://10.0.0.1:8000",
-        });
-        const accessMethod = await select({
-          message: "How do you reach it?",
-          choices: [
-            { value: "direct",     name: "Direct — reachable over VPN or private network" },
-            { value: "ssh-tunnel", name: "SSH tunnel — forward the port locally first" },
-          ],
-        });
-
-        resource = {
-          type: "server",
-          name,
-          backend: serverBackend as "vllm" | "sglang",
-          endpoint,
-          accessMethod: accessMethod as "direct" | "ssh-tunnel",
-        };
-
-        if (accessMethod === "ssh-tunnel") {
-          (resource as RemoteServer).sshHost = await input({ message: "SSH hostname or IP:" });
-          (resource as RemoteServer).sshUser = await input({ message: "SSH username:" });
-        }
+        throw err;
       }
-
-      config.resources.push(resource);
-      saveResourcesConfig(config);
-      console.log(chalk.green(`✓ Added "${resource.name}" to ${RESOURCES_FILE}`));
-      console.log(chalk.dim("Run `mwoc probe` to scan it now."));
     })
 );
 
@@ -422,23 +613,26 @@ program
   .command("init")
   .description("First-run wizard: declare resources and authenticate providers")
   .action(async () => {
-    const existing = loadResourcesConfig();
-    if (existing.resources.length > 0) {
-      console.log(chalk.yellow(`\nWarning: ${existing.resources.length} resource(s) already configured in ${RESOURCES_FILE}.`));
-      console.log(chalk.yellow("Running init will replace your entire resource list.\n"));
-      console.log(chalk.dim("To add a single resource instead, run: mwoc resource add\n"));
-      const proceed = await select({
-        message: "Replace existing configuration and start over?",
-        choices: [
-          { value: false, name: "No, keep my current resources" },
-          { value: true,  name: "Yes, wipe and reconfigure from scratch" },
-        ],
-      });
-      if (!proceed) {
-        console.log(chalk.dim("Aborted. Your resources are unchanged."));
-        return;
+    try {
+      const existing = loadResourcesConfig();
+      if (existing.resources.length > 0) {
+        console.log(chalk.yellow(`\nWarning: ${existing.resources.length} resource(s) already configured in ${RESOURCES_FILE}.`));
+        console.log(chalk.yellow("Running init will replace your entire resource list.\n"));
+        console.log(chalk.dim("To add a single resource instead, run: mwoc resource add\n"));
+        const proceed = await wrapPrompt(() =>
+          select({
+            message: "Replace existing configuration and start over?",
+            choices: [
+              { value: false, name: "No, keep my current resources" },
+              { value: true,  name: "Yes, wipe and reconfigure from scratch" },
+            ],
+          })
+        );
+        if (!proceed) {
+          console.log(chalk.dim("Aborted. Your resources are unchanged."));
+          return;
+        }
       }
-    }
 
     console.log(chalk.bold("\nWelcome to My World of Compute (MWoC)\n"));
     console.log(`Config will be stored in ${chalk.cyan(MWOC_DIR)}\n`);
@@ -447,15 +641,17 @@ program
 
     // --- Local machine ---
     console.log(chalk.bold("Local machine"));
-    const localBackend = await select({
-      message: "What local inference backend are you running?",
-      choices: [
-        { value: "ollama", name: "Ollama" },
-        { value: "vllm",   name: "vLLM" },
-        { value: "sglang", name: "SGLang" },
-        { value: "none",   name: "None / skip" },
-      ],
-    });
+    const localBackend = await wrapPrompt(() =>
+      select({
+        message: "What local inference backend are you running?",
+        choices: [
+          { value: "ollama", name: "Ollama" },
+          { value: "vllm",   name: "vLLM" },
+          { value: "sglang", name: "SGLang" },
+          { value: "none",   name: "None / skip" },
+        ],
+      })
+    );
 
     if (localBackend === "ollama") {
       const OLLAMA_DEFAULT = "http://localhost:11434";
@@ -464,13 +660,15 @@ program
 
       if (ollamaFound) {
         console.log(chalk.green("found"));
-        const addOllama = await select({
-          message: "Add it to MWoC?",
-          choices: [
-            { value: true, name: "Yes" },
-            { value: false, name: "No" },
-          ],
-        });
+        const addOllama = await wrapPrompt(() =>
+          select({
+            message: "Add it to MWoC?",
+            choices: [
+              { value: true, name: "Yes" },
+              { value: false, name: "No" },
+            ],
+          })
+        );
         if (addOllama) {
           resources.push({
             type: "local",
@@ -481,22 +679,28 @@ program
         }
       } else {
         console.log(chalk.dim("not found"));
-        const ollamaElsewhere = await select({
-          message: "Is Ollama running at a different address?",
-          choices: [
-            { value: true, name: "Yes" },
-            { value: false, name: "No" },
-          ],
-        });
+        const ollamaElsewhere = await wrapPrompt(() =>
+          select({
+            message: "Is Ollama running at a different address?",
+            choices: [
+              { value: true, name: "Yes" },
+              { value: false, name: "No" },
+            ],
+          })
+        );
         if (ollamaElsewhere) {
-          const endpoint = await input({
-            message: "Ollama endpoint:",
-            default: OLLAMA_DEFAULT,
-          });
-          const name = await input({
-            message: "Name for this resource:",
-            default: "local-ollama",
-          });
+          const endpoint = await wrapPrompt(() =>
+            input({
+              message: "Ollama endpoint:",
+              default: OLLAMA_DEFAULT,
+            })
+          );
+          const name = await wrapPrompt(() =>
+            input({
+              message: "Name for this resource:",
+              default: "local-ollama",
+            })
+          );
           resources.push({ type: "local", name, backend: "ollama", endpoint });
         }
       }
@@ -507,14 +711,18 @@ program
       const found = await pingOpenAICompatible(defaultEndpoint);
       console.log(found ? chalk.green("found") : chalk.dim("not found"));
 
-      const endpoint = await input({
-        message: `${localBackend.toUpperCase()} endpoint:`,
-        default: defaultEndpoint,
-      });
-      const name = await input({
-        message: "Name for this resource:",
-        default: defaultName,
-      });
+      const endpoint = await wrapPrompt(() =>
+        input({
+          message: `${localBackend.toUpperCase()} endpoint:`,
+          default: defaultEndpoint,
+        })
+      );
+      const name = await wrapPrompt(() =>
+        input({
+          message: "Name for this resource:",
+          default: defaultName,
+        })
+      );
       resources.push({ type: "local", name, backend: localBackend, endpoint });
     }
 
@@ -522,22 +730,26 @@ program
     console.log("\n" + chalk.bold("Anthropic"));
     console.log(chalk.dim("Claude Pro (claude.ai) and the Anthropic API are separate services."));
 
-    const hasClaudePro = await select({
-      message: "Do you have a Claude Pro or Claude Max subscription (claude.ai)?",
-      choices: [
-        { value: true, name: "Yes" },
-        { value: false, name: "No" },
-      ],
-    });
-    if (hasClaudePro) {
-      const tier = await select({
-        message: "Which plan?",
+    const hasClaudePro = await wrapPrompt(() =>
+      select({
+        message: "Do you have a Claude Pro or Claude Max subscription (claude.ai)?",
         choices: [
-          { value: "Pro", name: "Claude Pro ($20/mo)" },
-          { value: "Max", name: "Claude Max ($100/mo)" },
-          { value: "Team", name: "Claude Team" },
+          { value: true, name: "Yes" },
+          { value: false, name: "No" },
         ],
-      });
+      })
+    );
+    if (hasClaudePro) {
+      const tier = await wrapPrompt(() =>
+        select({
+          message: "Which plan?",
+          choices: [
+            { value: "Pro", name: "Claude Pro ($20/mo)" },
+            { value: "Max", name: "Claude Max ($100/mo)" },
+            { value: "Team", name: "Claude Team" },
+          ],
+        })
+      );
       resources.push({
         type: "cloud",
         name: `claude-${(tier as string).toLowerCase()}`,
@@ -548,15 +760,17 @@ program
       console.log(chalk.green(`✓ Claude ${tier} subscription noted`));
     }
 
-    const hasAnthropicApi = await select({
-      message: "Do you have an Anthropic API key?",
-      choices: [
-        { value: true, name: "Yes" },
-        { value: false, name: "No" },
-      ],
-    });
+    const hasAnthropicApi = await wrapPrompt(() =>
+      select({
+        message: "Do you have an Anthropic API key?",
+        choices: [
+          { value: true, name: "Yes" },
+          { value: false, name: "No" },
+        ],
+      })
+    );
     if (hasAnthropicApi) {
-      const key = await password({ message: "Anthropic API key:" });
+      const key = await wrapPrompt(() => password({ message: "Anthropic API key:" }));
       const auth = loadAuth();
       auth["anthropic"] = { apiKey: key.trim() };
       saveAuth(auth);
@@ -573,18 +787,22 @@ program
     console.log("\n" + chalk.bold("OpenAI"));
     console.log(chalk.dim("ChatGPT subscriptions and the OpenAI API are separate services."));
 
-    const hasChatGPT = await select({
-      message: "Do you have a ChatGPT subscription (chatgpt.com)?",
-      choices: [
-        { value: true, name: "Yes" },
-        { value: false, name: "No" },
-      ],
-    });
+    const hasChatGPT = await wrapPrompt(() =>
+      select({
+        message: "Do you have a ChatGPT subscription (chatgpt.com)?",
+        choices: [
+          { value: true, name: "Yes" },
+          { value: false, name: "No" },
+        ],
+      })
+    );
     if (hasChatGPT) {
-      const tier = await input({
-        message: "Subscription tier (e.g. Plus, Edu, Team, Pro):",
-        default: "Plus",
-      });
+      const tier = await wrapPrompt(() =>
+        input({
+          message: "Subscription tier (e.g. Plus, Edu, Team, Pro):",
+          default: "Plus",
+        })
+      );
       resources.push({
         type: "cloud",
         name: `chatgpt-${tier.toLowerCase()}`,
@@ -595,15 +813,17 @@ program
       console.log(chalk.green(`✓ ChatGPT ${tier} subscription noted`));
     }
 
-    const hasOpenAIApi = await select({
-      message: "Do you have an OpenAI API key?",
-      choices: [
-        { value: true, name: "Yes" },
-        { value: false, name: "No" },
-      ],
-    });
+    const hasOpenAIApi = await wrapPrompt(() =>
+      select({
+        message: "Do you have an OpenAI API key?",
+        choices: [
+          { value: true, name: "Yes" },
+          { value: false, name: "No" },
+        ],
+      })
+    );
     if (hasOpenAIApi) {
-      const key = await password({ message: "OpenAI API key:" });
+      const key = await wrapPrompt(() => password({ message: "OpenAI API key:" }));
       const auth = loadAuth();
       auth["openai"] = { apiKey: key.trim() };
       saveAuth(auth);
@@ -633,34 +853,42 @@ program
         ? "Do you have access to a remote server running an inference API?"
         : "Add another remote server?";
 
-      const addServer = await select({
-        message: prompt,
-        choices: [
-          { value: true, name: "Yes" },
-          { value: false, name: "No" },
-        ],
-      });
+      const addServer = await wrapPrompt(() =>
+        select({
+          message: prompt,
+          choices: [
+            { value: true, name: "Yes" },
+            { value: false, name: "No" },
+          ],
+        })
+      );
 
       if (!addServer) {
         addAnotherServer = false;
         break;
       }
 
-      const name = await input({
-        message: "Name for this server:",
-        default: `server-${serverCount + 1}`,
-      });
-      const endpoint = await input({
-        message: "Inference API endpoint URL:",
-        default: "http://10.0.0.1:8000",
-      });
-      const accessMethod = await select({
-        message: "How do you reach it?",
-        choices: [
-          { value: "direct", name: "Direct — reachable over VPN or private network" },
-          { value: "ssh-tunnel", name: "SSH tunnel — forward the port locally first" },
-        ],
-      });
+      const name = await wrapPrompt(() =>
+        input({
+          message: "Name for this server:",
+          default: `server-${serverCount + 1}`,
+        })
+      );
+      const endpoint = await wrapPrompt(() =>
+        input({
+          message: "Inference API endpoint URL:",
+          default: "http://10.0.0.1:8000",
+        })
+      );
+      const accessMethod = await wrapPrompt(() =>
+        select({
+          message: "How do you reach it?",
+          choices: [
+            { value: "direct", name: "Direct — reachable over VPN or private network" },
+            { value: "ssh-tunnel", name: "SSH tunnel — forward the port locally first" },
+          ],
+        })
+      );
 
       const server: Resource = {
         type: "server",
@@ -671,8 +899,8 @@ program
       };
 
       if (accessMethod === "ssh-tunnel") {
-        (server as RemoteServer).sshHost = await input({ message: "SSH hostname or IP:" });
-        (server as RemoteServer).sshUser = await input({ message: "SSH username:" });
+        (server as RemoteServer).sshHost = await wrapPrompt(() => input({ message: "SSH hostname or IP:" }));
+        (server as RemoteServer).sshUser = await wrapPrompt(() => input({ message: "SSH username:" }));
       }
 
       resources.push(server);
@@ -684,7 +912,13 @@ program
 
     console.log(chalk.green(`\n✓ Saved ${resources.length} resource(s) to ${RESOURCES_FILE}`));
     console.log(chalk.dim("Run `mwoc probe` to scan them now.\n"));
-  });
+  } catch (err) {
+    if (err instanceof CancelFlowError) {
+      process.exit(0);
+    }
+    throw err;
+  }
+});
 
 // --- mwoc dash ---
 program
@@ -884,13 +1118,15 @@ program
       if (modelIds.length > 3) {
         console.log(chalk.yellow(`Found ${modelIds.length} models on ${targetResource.resource.name}:`));
         for (const id of modelIds) console.log(chalk.dim(`  ${id}`));
-        const proceed = await select({
-          message: "Benchmark all of them? (This may take a while)",
-          choices: [
-            { value: false, name: "No, cancel" },
-            { value: true,  name: "Yes, benchmark all" },
-          ],
-        });
+        const proceed = await wrapPrompt(() =>
+          select({
+            message: "Benchmark all of them? (This may take a while)",
+            choices: [
+              { value: false, name: "No, cancel" },
+              { value: true,  name: "Yes, benchmark all" },
+            ],
+          })
+        );
         if (!proceed) return;
       }
     }
@@ -1017,6 +1253,5 @@ program
     }
   });
 
-program.parse();
 
-// Removed duplicated formatAge utility
+program.parse();

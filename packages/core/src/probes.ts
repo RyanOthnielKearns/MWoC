@@ -1,11 +1,13 @@
+import net from "node:net";
 import { fetchWithTimeout } from "./utils/http.js";
-import { wrapProbe } from "./utils/common.js";
+import { wrapProbe, normalizeProbeError } from "./utils/common.js";
 import type {
   LocalMachine,
   CloudSubscription,
   RemoteServer,
   ProbedResource,
   ModelEntry,
+  GpuState,
 } from "./types.js";
 import { getApiKey } from "./config.js";
 import { inferTier } from "./tiers.js";
@@ -51,7 +53,7 @@ export async function probeOllama(
       status: "unavailable",
       models: [],
       probedAt: timestamp(),
-      error: String(err),
+      error: normalizeProbeError(err),
     })
   );
 }
@@ -88,6 +90,11 @@ export async function probeRemoteServer(
   resource: RemoteServer,
   tierOverrides?: Record<string, string>
 ): Promise<ProbedResource> {
+  if (resource.accessMethod === "ssh-tunnel") {
+    return probeRemoteServerSsh(resource, tierOverrides);
+  }
+
+  // direct access: inference endpoint is the availability signal
   return wrapProbe<ProbedResource>(
     async () => {
       const models = await probeOpenAICompatible(
@@ -96,16 +103,63 @@ export async function probeRemoteServer(
         resource.name,
         tierOverrides
       );
-      return { resource, status: "available", models, probedAt: timestamp() };
+      return { resource, status: "available", models, probedAt: timestamp(), inferenceStatus: "online" };
     },
     (err) => ({
       resource,
       status: "unavailable",
       models: [],
       probedAt: timestamp(),
-      error: String(err),
+      error: normalizeProbeError(err),
+      inferenceStatus: "unknown",
     })
   );
+}
+
+async function probeRemoteServerSsh(
+  resource: RemoteServer,
+  tierOverrides?: Record<string, string>
+): Promise<ProbedResource> {
+  if (!resource.sshHost) {
+    return {
+      resource,
+      status: "unavailable",
+      models: [],
+      probedAt: timestamp(),
+      error: "ssh-tunnel resource is missing sshHost",
+    };
+  }
+
+  // Step 1: TCP check to port 22 — machine reachability, no auth required
+  const reachable = await checkTcpReachable(resource.sshHost, 22, 5000);
+  if (!reachable) {
+    return {
+      resource,
+      status: "unavailable",
+      models: [],
+      probedAt: timestamp(),
+      error: `SSH host unreachable (${resource.sshHost}:22)`,
+    };
+  }
+
+  // Step 2: inference endpoint check — best-effort, does not affect status
+  try {
+    const models = await probeOpenAICompatible(
+      resource.endpoint,
+      undefined,
+      resource.name,
+      tierOverrides
+    );
+    return { resource, status: "available", models, probedAt: timestamp(), inferenceStatus: "online" };
+  } catch {
+    return {
+      resource,
+      status: "available",
+      models: [],
+      probedAt: timestamp(),
+      inferenceStatus: "offline",
+    };
+  }
 }
 
 // --- Anthropic probe ---
@@ -164,7 +218,7 @@ export async function probeAnthropic(
       status: "unavailable",
       models: [],
       probedAt: timestamp(),
-      error: String(err),
+      error: normalizeProbeError(err),
     })
   );
 }
@@ -211,9 +265,63 @@ export async function probeOpenAI(
       status: "unavailable",
       models: [],
       probedAt: timestamp(),
-      error: String(err),
+      error: normalizeProbeError(err),
     })
   );
+}
+
+// --- SSH host reachability (TCP port check) ---
+
+function checkTcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve(false);
+    }, timeoutMs);
+    socket.on("connect", () => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(true);
+    });
+    socket.on("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}
+
+// --- GPU state via Upstash Redis ---
+
+function resolveEnvRef(value: string): string {
+  if (value.startsWith("$")) {
+    return process.env[value.slice(1)] ?? value;
+  }
+  return value;
+}
+
+export async function fetchGpuState(resource: RemoteServer): Promise<GpuState | null> {
+  if (!resource.gpuMonitor) return null;
+  const { redisRestUrl, redisRestToken, stateKey = "gpu:state" } = resource.gpuMonitor;
+  const url = resolveEnvRef(redisRestUrl);
+  const token = resolveEnvRef(redisRestToken);
+  try {
+    const res = await fetchWithTimeout(
+      `${url.replace(/\/$/, "")}/get/${stateKey}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      5000
+    );
+    if (!res.ok) return null;
+    const json = (await res.json()) as { result?: string };
+    if (!json.result) return null;
+    const raw = JSON.parse(json.result) as { gpus: Array<Record<string, unknown>>; updatedAt: string };
+    return {
+      gpus: raw.gpus.map(({ temperature: _t, ...g }) => g as unknown as import("./types.js").GpuEntry),
+      updatedAt: raw.updatedAt,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // --- Dispatch ---
@@ -240,7 +348,7 @@ export async function probeResource(
           status: "unavailable",
           models: [],
           probedAt: timestamp(),
-          error: String(err),
+          error: normalizeProbeError(err),
         })
       );
     }

@@ -8,8 +8,9 @@ import {
   fetchOllamaModelInfo,
   listBenchRuns,
   loadBenchRun,
+  fetchGpuState,
 } from "@mwoc/core";
-import type { StateCache } from "@mwoc/core";
+import type { StateCache, RemoteServer, GpuState } from "@mwoc/core";
 
 const PORT = 18799;
 
@@ -337,6 +338,27 @@ function buildHtml(port: number): string {
     }
     @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
+    /* ── GPU panel ── */
+    .resource-grid.has-gpu-cards { grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); }
+    .gpu-panel { margin-top: 10px; }
+    .gpu-panel-header { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+    .gpu-stale { color: var(--unknown); }
+    .gpu-freshness { font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 10px; }
+    .gpu-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
+    .gpu-label { color: var(--text-dim); width: 44px; flex-shrink: 0; font-size: 11px; padding-top: 2px; }
+    .gpu-bars { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
+    .gpu-bar-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+    .gpu-bar-label { width: 28px; color: var(--text-dim); flex-shrink: 0; font-size: 10px; }
+    .util-bar-wrap { width: 72px; height: 5px; background: var(--border); border-radius: 2px; flex-shrink: 0; overflow: hidden; }
+    .util-fill { height: 100%; border-radius: 2px; }
+    .util-fill.cool { background: var(--available); }
+    .util-fill.warm { background: var(--unknown); }
+    .util-fill.hot  { background: var(--unavailable); }
+    .gpu-bar-value { color: var(--text); font-size: 11px; white-space: nowrap; }
+    .gpu-free-badge { font-size: 10px; padding: 1px 5px; border-radius: 3px; flex-shrink: 0; margin-top: 2px; }
+    .gpu-free-badge.free   { background: rgba(34,197,94,0.12);  color: var(--available); }
+    .gpu-free-badge.in-use { background: rgba(245,158,11,0.12); color: var(--unknown); }
+
     /* ── Empty / loading states ── */
     .empty-state { text-align: center; padding: 56px 24px; color: var(--text-dim); }
     .empty-state h2 { color: var(--text); margin-bottom: 6px; font-size: 16px; }
@@ -429,6 +451,7 @@ function buildHtml(port: number): string {
   <script>
     // ── State ──────────────────────────────────────────────────────────────
     let currentState = null;
+    let currentGpuStates = {};    // resourceName → GpuState | null
     let currentView = 'resources';
     let expandedRow = null;       // modelKey of the currently open accordion
     let expandCache = {};         // modelKey → { info, evals } (session cache)
@@ -483,6 +506,44 @@ function buildHtml(port: number): string {
       document.getElementById('stat-frontier').textContent = allModels.filter(m => m.tier === 'frontier').length;
     }
 
+    // ── GPU panel rendering ────────────────────────────────────────────────
+    function renderGpuPanel(gpuState) {
+      const ageMs = Date.now() - new Date(gpuState.updatedAt).getTime();
+      const stale = ageMs > 5 * 60 * 1000;
+      const ageFmt = formatAge(gpuState.updatedAt);
+      const staleHtml = stale ? ' <span class="gpu-stale">[stale]</span>' : '';
+      let html = '<hr class="divider"><div class="gpu-panel">';
+      html += '<div class="gpu-panel-header"><span>GPUs</span>'
+        + '<span class="gpu-freshness' + (stale ? ' gpu-stale' : '') + '">' + esc(ageFmt) + staleHtml + '</span></div>';
+      for (const g of gpuState.gpus) {
+        const memUsed = (g.memory_used / 1024).toFixed(1);
+        const memTotal = Math.round(g.memory_total / 1024);
+        const memPct = Math.round((g.memory_used / g.memory_total) * 100);
+        const utilClass = g.utilization >= 70 ? 'hot' : g.utilization >= 30 ? 'warm' : 'cool';
+        const memClass  = memPct >= 70 ? 'hot' : memPct >= 30 ? 'warm' : 'cool';
+        const freeClass = g.free ? 'free' : 'in-use';
+        const freeLabel = g.free ? 'free' : 'in use';
+        html += '<div class="gpu-row">'
+          + '<span class="gpu-label">GPU ' + g.index + '</span>'
+          + '<div class="gpu-bars">'
+          + '<div class="gpu-bar-row">'
+          + '<span class="gpu-bar-label">Util:</span>'
+          + '<div class="util-bar-wrap"><div class="util-fill ' + utilClass + '" style="width:' + g.utilization + '%"></div></div>'
+          + '<span class="gpu-bar-value">' + g.utilization + '%</span>'
+          + '</div>'
+          + '<div class="gpu-bar-row">'
+          + '<span class="gpu-bar-label">Mem:</span>'
+          + '<div class="util-bar-wrap"><div class="util-fill ' + memClass + '" style="width:' + memPct + '%"></div></div>'
+          + '<span class="gpu-bar-value">' + memUsed + '/' + memTotal + ' GB</span>'
+          + '</div>'
+          + '</div>'
+          + '<span class="gpu-free-badge ' + freeClass + '">' + freeLabel + '</span>'
+          + '</div>';
+      }
+      html += '</div>';
+      return html;
+    }
+
     // ── Resources view ─────────────────────────────────────────────────────
     function renderResources(state) {
       const grid = document.getElementById('resource-grid');
@@ -494,6 +555,8 @@ function buildHtml(port: number): string {
         grid.innerHTML = '<div class="empty-state"><h2>No resources declared</h2><p>Run <code>mwoc resource add</code> to add one.</p></div>';
         return;
       }
+      const hasGpuCards = currentGpuStates && Object.values(currentGpuStates).some(s => s !== null);
+      grid.classList.toggle('has-gpu-cards', hasGpuCards);
       grid.innerHTML = state.resources.map(r => {
         const status = r.status;
         const res = r.resource;
@@ -501,7 +564,8 @@ function buildHtml(port: number): string {
           : res.type === 'server' ? 'server'
           : (res.webOnly ? 'web subscription' : 'cloud api');
         const endpoint = res.type === 'local' ? res.endpoint
-          : res.type === 'server' ? res.endpoint
+          : res.type === 'server'
+            ? (res.accessMethod === 'ssh-tunnel' && res.sshHost ? res.sshHost : res.endpoint)
           : res.provider;
         const modelsHtml = r.models.length > 0
           ? '<hr class="divider">' + r.models.map(m => {
@@ -509,17 +573,22 @@ function buildHtml(port: number): string {
               return '<div class="model-row-inline"><div class="tier-dot ' + esc(m.tier) + '"></div>'
                 + '<span class="model-id-text">' + esc(m.modelId) + '</span>' + ctx + '</div>';
             }).join('') : '';
+        const inferenceOffline = r.inferenceStatus === 'offline';
         const emptyModels = r.models.length === 0
           ? '<hr class="divider"><div class="no-models">'
-            + (status === 'unavailable' ? 'Unreachable' : 'No models discovered') + '</div>' : '';
+            + (status === 'unavailable' ? 'Unreachable'
+              : inferenceOffline ? 'No inference endpoint running'
+              : 'No models discovered') + '</div>' : '';
         const errorHtml = r.error && status === 'unavailable'
           ? '<div class="error-msg">' + esc(r.error.slice(0, 90)) + '</div>' : '';
+        const gpuState = res.type === 'server' ? currentGpuStates[res.name] : null;
+        const gpuHtml = gpuState ? renderGpuPanel(gpuState) : '';
         return '<div class="resource-card ' + status + '">'
           + '<div class="card-header"><div><div class="card-name">' + esc(res.name) + '</div>'
           + '<div class="card-type">' + esc(typeLabel) + '</div></div>'
           + '<span class="status-badge ' + status + '">' + esc(status) + '</span></div>'
           + '<div class="card-endpoint">' + esc(endpoint) + '</div>'
-          + modelsHtml + emptyModels + errorHtml + '</div>';
+          + modelsHtml + emptyModels + errorHtml + gpuHtml + '</div>';
       }).join('');
     }
 
@@ -804,8 +873,12 @@ function buildHtml(port: number): string {
 
     // ── Data fetching ──────────────────────────────────────────────────────
     async function fetchState() {
-      const res = await fetch('/api/state');
-      currentState = await res.json();
+      const [stateRes, gpuRes] = await Promise.allSettled([
+        fetch('/api/state').then(r => r.json()),
+        fetch('/api/gpu-state').then(r => r.json()),
+      ]);
+      if (stateRes.status === 'fulfilled') currentState = stateRes.value;
+      if (gpuRes.status === 'fulfilled') currentGpuStates = gpuRes.value;
       updateStats(currentState);
       if (currentView === 'resources') renderResources(currentState);
       else renderModels(currentState);
@@ -975,6 +1048,25 @@ export async function startDashboard(): Promise<void> {
       }
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end(JSON.stringify({ runs, latest }));
+      return;
+    }
+
+    // ── GET /api/gpu-state ─────────────────────────────────────────────────
+    if (url.pathname === "/api/gpu-state" && req.method === "GET") {
+      const state = getResourceState();
+      const result: Record<string, GpuState | null> = {};
+      if (state) {
+        const serverResources = state.resources
+          .filter((r) => r.resource.type === "server" && (r.resource as RemoteServer).gpuMonitor)
+          .map((r) => r.resource as RemoteServer);
+        await Promise.all(
+          serverResources.map(async (r) => {
+            result[r.name] = await fetchGpuState(r);
+          })
+        );
+      }
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(result));
       return;
     }
 
