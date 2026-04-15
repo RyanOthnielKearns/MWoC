@@ -48,6 +48,8 @@ No options. Reads from the state cache — run `mwoc probe` first. The header sh
 | `unavailable` | Resource was unreachable or returned an error |
 | `unknown` | Resource cannot be probed (e.g. web-only subscription, unsupported provider) |
 
+For server resources with `gpuMonitor` configured, `mwoc status` fetches live GPU data from Redis and prints a per-GPU breakdown below the table: utilisation bar, memory used/total, temperature, and free/in-use status. Data older than 5 minutes is flagged as `[stale]`.
+
 ---
 
 ## `mwoc models`
@@ -145,7 +147,7 @@ mwoc dash
 
 No options. The command starts a local HTTP server on port 18799 and opens Chrome. The dashboard has two tabs:
 
-**Resources** — shows each declared resource as a card: name, type, status, model count, and last-probed time. A "Probe all" button re-runs `mwoc probe` and refreshes the page.
+**Resources** — shows each declared resource as a card: name, type, status, model count, and last-probed time. A "Probe all" button re-runs `mwoc probe` and refreshes the page. Server resources with `gpuMonitor` configured additionally show a per-GPU panel with utilisation bars, memory, temperature, and free/in-use status. GPU data is fetched live from Redis on each 5-second poll and is never cached in the state file.
 
 **Models** — sortable table of all models from available resources, with columns for tier, context window, and resource name. Click any row to expand an accordion showing:
 

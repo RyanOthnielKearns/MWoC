@@ -132,6 +132,27 @@ If the inference port isn't directly reachable, you'll need to forward it locall
   localPort: 8001
 ```
 
+### GPU monitoring
+
+If the server runs a GPU cron job that pushes `nvidia-smi` snapshots to Upstash Redis, you can wire that data into `mwoc status` and the dashboard:
+
+```yaml
+- type: server
+  name: virgil
+  backend: vllm
+  endpoint: http://10.0.0.1:8000
+  accessMethod: direct
+  hardwareNotes: "8× H100, 80GB each"
+  gpuMonitor:
+    redisRestUrl: $UPSTASH_REDIS_REST_URL    # env var reference, or literal URL
+    redisRestToken: $UPSTASH_REDIS_REST_TOKEN
+    stateKey: gpu:state                      # optional, defaults to "gpu:state"
+```
+
+Values prefixed with `$` are resolved from environment variables at runtime. Credentials are never exposed to the browser — they are used server-side only.
+
+When configured, `mwoc status` prints per-GPU utilisation, memory, and temperature below the resource table, and the `mwoc dash` dashboard shows a GPU panel on the resource card.
+
 **Fields:**
 
 | Field | Required | Description |
@@ -145,3 +166,6 @@ If the inference port isn't directly reachable, you'll need to forward it locall
 | `sshUser` | if tunnel | SSH username |
 | `localPort` | no | Local port used by the tunnel (for documentation) |
 | `hardwareNotes` | no | Free-text notes on hardware |
+| `gpuMonitor.redisRestUrl` | if GPU monitoring | Upstash Redis REST URL (or `$ENV_VAR`) |
+| `gpuMonitor.redisRestToken` | if GPU monitoring | Upstash Redis REST token (or `$ENV_VAR`) |
+| `gpuMonitor.stateKey` | no | Redis key to read; defaults to `gpu:state` |
