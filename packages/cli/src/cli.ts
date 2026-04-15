@@ -59,25 +59,46 @@ process.on("SIGINT", () => {
   }
 });
 
+// Custom error to exit the flow gracefully
+class CancelFlowError extends Error {
+  constructor() {
+    super("Flow cancelled");
+    this.name = "CancelFlowError";
+  }
+}
+
 // Wrap inquirer prompts to handle ExitPromptError gracefully
-async function wrapPrompt<T>(promptFn: () => Promise<T>): Promise<T | undefined> {
+async function wrapPrompt<T>(promptFn: () => Promise<T>): Promise<T> {
   try {
     inPrompt = true;
     return await promptFn();
   } catch (err) {
     if (err instanceof ExitPromptError) {
       // User pressed Ctrl+C during prompt
-      // First SIGINT: exit the flow gracefully (return undefined to cancel)
+      // First SIGINT: exit the flow gracefully
       // Second SIGINT during another prompt: exit the app
       if (sigintCount >= 2) {
         process.exit(0);
       }
-      // Return undefined to indicate prompt was cancelled
-      return undefined as T;
+      // Throw custom error to exit the flow gracefully
+      throw new CancelFlowError();
     }
     throw err;
   } finally {
     inPrompt = false;
+  }
+}
+
+// Handle CancelFlowError at the top level of commands with prompts
+async function runFlow<T>(fn: () => Promise<T>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    if (err instanceof CancelFlowError) {
+      // Exit gracefully without stack trace
+      process.exit(0);
+    }
+    throw err;
   }
 }
 
@@ -304,11 +325,18 @@ authCmd.addCommand(
     .description("Add or rotate a credential for a provider")
     .argument("<provider>", "Provider name (e.g. anthropic, openai)")
     .action(async (provider: string) => {
-      const key = await wrapPrompt(() => password({ message: `API key for ${provider}:` }));
-      const auth = loadAuth();
-      auth[provider] = { ...auth[provider], apiKey: key.trim() };
-      saveAuth(auth);
-      console.log(chalk.green(`✓ Saved API key for ${provider} to ${AUTH_FILE}`));
+      try {
+        const key = await wrapPrompt(() => password({ message: `API key for ${provider}:` }));
+        const auth = loadAuth();
+        auth[provider] = { ...auth[provider], apiKey: key.trim() };
+        saveAuth(auth);
+        console.log(chalk.green(`✓ Saved API key for ${provider} to ${AUTH_FILE}`));
+      } catch (err) {
+        if (err instanceof CancelFlowError) {
+          process.exit(0);
+        }
+        throw err;
+      }
     })
 );
 
@@ -374,182 +402,190 @@ resourceCmd.addCommand(
       const config = loadResourcesConfig();
       const existingNames = new Set(config.resources.map((r) => r.name));
 
-      const type = await wrapPrompt(() =>
-        select({
-          message: "Resource type:",
-          choices: [
-            { value: "local",  name: "Local machine  (Ollama / vLLM / SGLang)" },
-            { value: "cloud",  name: "Cloud provider (Anthropic, OpenAI, …)" },
-            { value: "server", name: "Remote server  (vLLM / SGLang over VPN or SSH)" },
-          ],
-        })
-      );
-
-      let resource: Resource;
-
-      if (type === "local") {
-        const backend = await wrapPrompt(() =>
+      try {
+        const type = await wrapPrompt(() =>
           select({
-            message: "Backend:",
+            message: "Resource type:",
             choices: [
-              { value: "ollama", name: "Ollama" },
-              { value: "vllm",   name: "vLLM" },
-              { value: "sglang", name: "SGLang" },
-            ],
-          })
-        );
-        const defaultEndpoint = backend === "ollama" ? "http://localhost:11434" : "http://localhost:8000";
-        const defaultName = backend === "ollama" ? "local-ollama" : backend === "vllm" ? "local-vllm" : "local-sglang";
-        const endpoint = await wrapPrompt(() =>
-          input({
-            message: `${(backend as string).toUpperCase()} endpoint:`,
-            default: defaultEndpoint,
-          })
-        );
-        const name = await wrapPrompt(() =>
-          input({
-            message: "Name for this resource:",
-            default: defaultName,
-          })
-        );
-        if (existingNames.has(name)) {
-          console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
-          return;
-        }
-        resource = { type: "local", name, backend: backend as "ollama" | "vllm" | "sglang", endpoint };
-
-      } else if (type === "cloud") {
-        const provider = await wrapPrompt(() =>
-          input({
-            message: "Provider (e.g. anthropic, openai, google):",
-            default: "anthropic",
-          })
-        );
-        const accessKind = await wrapPrompt(() =>
-          select({
-            message: "Access type:",
-            choices: [
-              { value: "api",     name: "API key" },
-              { value: "web",     name: "Web subscription (claude.ai, chatgpt.com, …)" },
+              { value: "local",  name: "Local machine  (Ollama / vLLM / SGLang)" },
+              { value: "cloud",  name: "Cloud provider (Anthropic, OpenAI, …)" },
+              { value: "server", name: "Remote server  (vLLM / SGLang over VPN or SSH)" },
             ],
           })
         );
 
-        if (accessKind === "web") {
-          const tier = await wrapPrompt(() =>
+        let resource: Resource;
+
+        if (type === "local") {
+          const backend = await wrapPrompt(() =>
+            select({
+              message: "Backend:",
+              choices: [
+                { value: "ollama", name: "Ollama" },
+                { value: "vllm",   name: "vLLM" },
+                { value: "sglang", name: "SGLang" },
+              ],
+            })
+          );
+          const defaultEndpoint = backend === "ollama" ? "http://localhost:11434" : "http://localhost:8000";
+          const defaultName = backend === "ollama" ? "local-ollama" : backend === "vllm" ? "local-vllm" : "local-sglang";
+          const endpoint = await wrapPrompt(() =>
             input({
-              message: "Subscription tier (e.g. Pro, Max, Plus, Edu):",
-              default: "Pro",
+              message: `${(backend as string).toUpperCase()} endpoint:`,
+              default: defaultEndpoint,
             })
           );
           const name = await wrapPrompt(() =>
             input({
               message: "Name for this resource:",
-              default: `${provider}-${tier.toLowerCase()}`,
+              default: defaultName,
             })
           );
           if (existingNames.has(name)) {
             console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
             return;
           }
-          resource = { type: "cloud", name, provider, tier, webOnly: true };
+          resource = { type: "local", name, backend: backend as "ollama" | "vllm" | "sglang", endpoint };
+
+        } else if (type === "cloud") {
+          const provider = await wrapPrompt(() =>
+            input({
+              message: "Provider (e.g. anthropic, openai, google):",
+              default: "anthropic",
+            })
+          );
+          const accessKind = await wrapPrompt(() =>
+            select({
+              message: "Access type:",
+              choices: [
+                { value: "api",     name: "API key" },
+                { value: "web",     name: "Web subscription (claude.ai, chatgpt.com, …)" },
+              ],
+            })
+          );
+
+          if (accessKind === "web") {
+            const tier = await wrapPrompt(() =>
+              input({
+                message: "Subscription tier (e.g. Pro, Max, Plus, Edu):",
+                default: "Pro",
+              })
+            );
+            const name = await wrapPrompt(() =>
+              input({
+                message: "Name for this resource:",
+                default: `${provider}-${tier.toLowerCase()}`,
+              })
+            );
+            if (existingNames.has(name)) {
+              console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
+              return;
+            }
+            resource = { type: "cloud", name, provider, tier, webOnly: true };
+          } else {
+            const key = await wrapPrompt(() =>
+              password({ message: `API key for ${provider}:` })
+            );
+            const auth = loadAuth();
+            auth[provider] = { ...auth[provider], apiKey: key.trim() };
+            saveAuth(auth);
+            console.log(chalk.green(`✓ Saved API key for ${provider} to ${AUTH_FILE}`));
+
+            const name = await wrapPrompt(() =>
+              input({
+                message: "Name for this resource:",
+                default: `${provider}-api`,
+              })
+            );
+            if (existingNames.has(name)) {
+              console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
+              return;
+            }
+            resource = { type: "cloud", name, provider, tier: "API" };
+          }
+
         } else {
-          const key = await wrapPrompt(() =>
-            password({ message: `API key for ${provider}:` })
-          );
-          const auth = loadAuth();
-          auth[provider] = { ...auth[provider], apiKey: key.trim() };
-          saveAuth(auth);
-          console.log(chalk.green(`✓ Saved API key for ${provider} to ${AUTH_FILE}`));
-
+          // server
           const name = await wrapPrompt(() =>
             input({
-              message: "Name for this resource:",
-              default: `${provider}-api`,
+              message: "Name for this server:",
+              default: "gpu-server",
             })
           );
           if (existingNames.has(name)) {
             console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
             return;
           }
-          resource = { type: "cloud", name, provider, tier: "API" };
-        }
+          const serverBackend = await wrapPrompt(() =>
+            select({
+              message: "Backend:",
+              choices: [
+                { value: "vllm",   name: "vLLM" },
+                { value: "sglang", name: "SGLang" },
+              ],
+            })
+          );
+          const endpoint = await wrapPrompt(() =>
+            input({
+              message: "Inference API endpoint URL:",
+              default: "http://10.0.0.1:8000",
+            })
+          );
+          const accessMethod = await wrapPrompt(() =>
+            select({
+              message: "How do you reach it?",
+              choices: [
+                { value: "direct",     name: "Direct — reachable over VPN or private network" },
+                { value: "ssh-tunnel", name: "SSH tunnel — forward the port locally first" },
+              ],
+            })
+          );
 
-      } else {
-        // server
-        const name = await wrapPrompt(() =>
-          input({
-            message: "Name for this server:",
-            default: "gpu-server",
-          })
-        );
-        if (existingNames.has(name)) {
-          console.log(chalk.yellow(`A resource named "${name}" already exists. Use a different name or remove it first.`));
-          return;
-        }
-        const serverBackend = await wrapPrompt(() =>
-          select({
-            message: "Backend:",
-            choices: [
-              { value: "vllm",   name: "vLLM" },
-              { value: "sglang", name: "SGLang" },
-            ],
-          })
-        );
-        const endpoint = await wrapPrompt(() =>
-          input({
-            message: "Inference API endpoint URL:",
-            default: "http://10.0.0.1:8000",
-          })
-        );
-        const accessMethod = await wrapPrompt(() =>
-          select({
-            message: "How do you reach it?",
-            choices: [
-              { value: "direct",     name: "Direct — reachable over VPN or private network" },
-              { value: "ssh-tunnel", name: "SSH tunnel — forward the port locally first" },
-            ],
-          })
-        );
-
-        resource = {
-          type: "server",
-          name,
-          backend: serverBackend as "vllm" | "sglang",
-          endpoint,
-          accessMethod: accessMethod as "direct" | "ssh-tunnel",
-        };
-
-        if (accessMethod === "ssh-tunnel") {
-          (resource as RemoteServer).sshHost = await wrapPrompt(() => input({ message: "SSH hostname or IP:" }));
-          (resource as RemoteServer).sshUser = await wrapPrompt(() => input({ message: "SSH username:" }));
-        }
-
-        const addGpuMonitor = await wrapPrompt(() =>
-          select({
-            message: "Configure GPU monitoring? (reads live stats from Upstash Redis)",
-            choices: [
-              { value: "no",  name: "No" },
-              { value: "yes", name: "Yes" },
-            ],
-          })
-        );
-        if (addGpuMonitor === "yes") {
-          const redisRestUrl = await wrapPrompt(() => input({ message: "Redis REST URL:" }));
-          const redisRestToken = await wrapPrompt(() => password({ message: "Redis REST token:" }));
-          const stateKey = await wrapPrompt(() => input({ message: "Redis state key:", default: "gpu:state" }));
-          (resource as RemoteServer).gpuMonitor = {
-            redisRestUrl: redisRestUrl.trim(),
-            redisRestToken: redisRestToken.trim(),
-            stateKey,
+          resource = {
+            type: "server",
+            name,
+            backend: serverBackend as "vllm" | "sglang",
+            endpoint,
+            accessMethod: accessMethod as "direct" | "ssh-tunnel",
           };
-        }
-      }
 
-      config.resources.push(resource);
-      saveResourcesConfig(config);
-      console.log(chalk.green(`✓ Added "${resource.name}" to ${RESOURCES_FILE}`));
-      console.log(chalk.dim("Run `mwoc probe` to scan it now."));
+          if (accessMethod === "ssh-tunnel") {
+            (resource as RemoteServer).sshHost = await wrapPrompt(() => input({ message: "SSH hostname or IP:" }));
+            (resource as RemoteServer).sshUser = await wrapPrompt(() => input({ message: "SSH username:" }));
+          }
+
+          const addGpuMonitor = await wrapPrompt(() =>
+            select({
+              message: "Configure GPU monitoring? (reads live stats from Upstash Redis)",
+              choices: [
+                { value: "no",  name: "No" },
+                { value: "yes", name: "Yes" },
+              ],
+            })
+          );
+          if (addGpuMonitor === "yes") {
+            const redisRestUrl = await wrapPrompt(() => input({ message: "Redis REST URL:" }));
+            const redisRestToken = await wrapPrompt(() => password({ message: "Redis REST token:" }));
+            const stateKey = await wrapPrompt(() => input({ message: "Redis state key:", default: "gpu:state" }));
+            (resource as RemoteServer).gpuMonitor = {
+              redisRestUrl: redisRestUrl.trim(),
+              redisRestToken: redisRestToken.trim(),
+              stateKey,
+            };
+          }
+        }
+
+        config.resources.push(resource);
+        saveResourcesConfig(config);
+        console.log(chalk.green(`✓ Added "${resource.name}" to ${RESOURCES_FILE}`));
+        console.log(chalk.dim("Run `mwoc probe` to scan it now."));
+      } catch (err) {
+        if (err instanceof CancelFlowError) {
+          // Exit gracefully without stack trace
+          process.exit(0);
+        }
+        throw err;
+      }
     })
 );
 
@@ -577,25 +613,26 @@ program
   .command("init")
   .description("First-run wizard: declare resources and authenticate providers")
   .action(async () => {
-    const existing = loadResourcesConfig();
-    if (existing.resources.length > 0) {
-      console.log(chalk.yellow(`\nWarning: ${existing.resources.length} resource(s) already configured in ${RESOURCES_FILE}.`));
-      console.log(chalk.yellow("Running init will replace your entire resource list.\n"));
-      console.log(chalk.dim("To add a single resource instead, run: mwoc resource add\n"));
-      const proceed = await wrapPrompt(() =>
-        select({
-          message: "Replace existing configuration and start over?",
-          choices: [
-            { value: false, name: "No, keep my current resources" },
-            { value: true,  name: "Yes, wipe and reconfigure from scratch" },
-          ],
-        })
-      );
-      if (!proceed) {
-        console.log(chalk.dim("Aborted. Your resources are unchanged."));
-        return;
+    try {
+      const existing = loadResourcesConfig();
+      if (existing.resources.length > 0) {
+        console.log(chalk.yellow(`\nWarning: ${existing.resources.length} resource(s) already configured in ${RESOURCES_FILE}.`));
+        console.log(chalk.yellow("Running init will replace your entire resource list.\n"));
+        console.log(chalk.dim("To add a single resource instead, run: mwoc resource add\n"));
+        const proceed = await wrapPrompt(() =>
+          select({
+            message: "Replace existing configuration and start over?",
+            choices: [
+              { value: false, name: "No, keep my current resources" },
+              { value: true,  name: "Yes, wipe and reconfigure from scratch" },
+            ],
+          })
+        );
+        if (!proceed) {
+          console.log(chalk.dim("Aborted. Your resources are unchanged."));
+          return;
+        }
       }
-    }
 
     console.log(chalk.bold("\nWelcome to My World of Compute (MWoC)\n"));
     console.log(`Config will be stored in ${chalk.cyan(MWOC_DIR)}\n`);
@@ -875,6 +912,13 @@ program
 
     console.log(chalk.green(`\n✓ Saved ${resources.length} resource(s) to ${RESOURCES_FILE}`));
     console.log(chalk.dim("Run `mwoc probe` to scan them now.\n"));
+    } catch (err) {
+      if (err instanceof ExitPromptError) {
+        console.log(chalk.dim("\nInit cancelled."));
+        return;
+      }
+      throw err;
+    }
   });
 
 // --- mwoc dash ---

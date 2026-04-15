@@ -550,7 +550,8 @@ function buildHtml(port: number): string {
           : res.type === 'server' ? 'server'
           : (res.webOnly ? 'web subscription' : 'cloud api');
         const endpoint = res.type === 'local' ? res.endpoint
-          : res.type === 'server' ? res.endpoint
+          : res.type === 'server'
+            ? (res.accessMethod === 'ssh-tunnel' && res.sshHost ? res.sshHost : res.endpoint)
           : res.provider;
         const modelsHtml = r.models.length > 0
           ? '<hr class="divider">' + r.models.map(m => {
