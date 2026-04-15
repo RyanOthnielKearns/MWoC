@@ -40,6 +40,31 @@ export interface CloudSubscription {
   // Models discovered by probing the API (not applicable for webOnly resources)
 }
 
+export interface GpuMonitorConfig {
+  /** Upstash Redis REST URL — or an env var reference like "$UPSTASH_REDIS_REST_URL" */
+  redisRestUrl: string;
+  /** Upstash Redis REST token — or an env var reference like "$UPSTASH_REDIS_REST_TOKEN" */
+  redisRestToken: string;
+  /** Redis key to read; defaults to "gpu:state" */
+  stateKey?: string;
+}
+
+export interface GpuEntry {
+  index: number;
+  name: string;
+  utilization: number;    // %
+  memory_used: number;    // MiB
+  memory_total: number;   // MiB
+  temperature: number;    // °C
+  free: boolean;
+  percent_available: number;
+}
+
+export interface GpuState {
+  gpus: GpuEntry[];
+  updatedAt: string; // ISO timestamp
+}
+
 export interface RemoteServer {
   type: "server";
   name: string;
@@ -50,6 +75,7 @@ export interface RemoteServer {
   sshUser?: string;
   localPort?: number; // local port for the tunnel
   hardwareNotes?: string;
+  gpuMonitor?: GpuMonitorConfig;
   // Models discovered by probing
 }
 
@@ -68,6 +94,12 @@ export interface ProbedResource {
   models: ModelEntry[];
   probedAt: string; // ISO timestamp
   error?: string;
+  /**
+   * For server resources only: whether the inference endpoint was reachable at
+   * probe time. A server can be `available` (SSH host up) while inference is
+   * `offline` (no vLLM/SGLang process running).
+   */
+  inferenceStatus?: "online" | "offline" | "unknown";
 }
 
 export interface StateCache {
