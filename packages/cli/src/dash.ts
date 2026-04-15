@@ -339,21 +339,23 @@ function buildHtml(port: number): string {
     @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
     /* ── GPU panel ── */
+    .resource-grid.has-gpu-cards { grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); }
     .gpu-panel { margin-top: 10px; }
-    .gpu-panel-header { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+    .gpu-panel-header { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
     .gpu-stale { color: var(--unknown); }
     .gpu-freshness { font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 10px; }
-    .gpu-row { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 4px; flex-wrap: wrap; }
-    .gpu-label { color: var(--text-dim); width: 44px; flex-shrink: 0; }
-    .util-bar-wrap { width: 56px; height: 5px; background: var(--border); border-radius: 2px; flex-shrink: 0; overflow: hidden; }
+    .gpu-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
+    .gpu-label { color: var(--text-dim); width: 44px; flex-shrink: 0; font-size: 11px; padding-top: 2px; }
+    .gpu-bars { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
+    .gpu-bar-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+    .gpu-bar-label { width: 28px; color: var(--text-dim); flex-shrink: 0; font-size: 10px; }
+    .util-bar-wrap { width: 72px; height: 5px; background: var(--border); border-radius: 2px; flex-shrink: 0; overflow: hidden; }
     .util-fill { height: 100%; border-radius: 2px; }
     .util-fill.cool { background: var(--available); }
     .util-fill.warm { background: var(--unknown); }
     .util-fill.hot  { background: var(--unavailable); }
-    .gpu-util { width: 28px; color: var(--text); text-align: right; flex-shrink: 0; }
-    .gpu-mem  { color: var(--text-dim); font-size: 10px; }
-    .gpu-temp { color: var(--text-dim); font-size: 10px; }
-    .gpu-free-badge { font-size: 10px; padding: 1px 5px; border-radius: 3px; }
+    .gpu-bar-value { color: var(--text); font-size: 11px; white-space: nowrap; }
+    .gpu-free-badge { font-size: 10px; padding: 1px 5px; border-radius: 3px; flex-shrink: 0; margin-top: 2px; }
     .gpu-free-badge.free   { background: rgba(34,197,94,0.12);  color: var(--available); }
     .gpu-free-badge.in-use { background: rgba(245,158,11,0.12); color: var(--unknown); }
 
@@ -516,15 +518,25 @@ function buildHtml(port: number): string {
       for (const g of gpuState.gpus) {
         const memUsed = (g.memory_used / 1024).toFixed(1);
         const memTotal = Math.round(g.memory_total / 1024);
-        const fillClass = g.utilization >= 70 ? 'hot' : g.utilization >= 30 ? 'warm' : 'cool';
+        const memPct = Math.round((g.memory_used / g.memory_total) * 100);
+        const utilClass = g.utilization >= 70 ? 'hot' : g.utilization >= 30 ? 'warm' : 'cool';
+        const memClass  = memPct >= 70 ? 'hot' : memPct >= 30 ? 'warm' : 'cool';
         const freeClass = g.free ? 'free' : 'in-use';
         const freeLabel = g.free ? 'free' : 'in use';
         html += '<div class="gpu-row">'
           + '<span class="gpu-label">GPU ' + g.index + '</span>'
-          + '<div class="util-bar-wrap"><div class="util-fill ' + fillClass + '" style="width:' + g.utilization + '%"></div></div>'
-          + '<span class="gpu-util">' + g.utilization + '%</span>'
-          + '<span class="gpu-mem">' + memUsed + '/' + memTotal + ' GB</span>'
-          + '<span class="gpu-temp">' + g.temperature + '°C</span>'
+          + '<div class="gpu-bars">'
+          + '<div class="gpu-bar-row">'
+          + '<span class="gpu-bar-label">Util:</span>'
+          + '<div class="util-bar-wrap"><div class="util-fill ' + utilClass + '" style="width:' + g.utilization + '%"></div></div>'
+          + '<span class="gpu-bar-value">' + g.utilization + '%</span>'
+          + '</div>'
+          + '<div class="gpu-bar-row">'
+          + '<span class="gpu-bar-label">Mem:</span>'
+          + '<div class="util-bar-wrap"><div class="util-fill ' + memClass + '" style="width:' + memPct + '%"></div></div>'
+          + '<span class="gpu-bar-value">' + memUsed + '/' + memTotal + ' GB</span>'
+          + '</div>'
+          + '</div>'
           + '<span class="gpu-free-badge ' + freeClass + '">' + freeLabel + '</span>'
           + '</div>';
       }
@@ -543,6 +555,8 @@ function buildHtml(port: number): string {
         grid.innerHTML = '<div class="empty-state"><h2>No resources declared</h2><p>Run <code>mwoc resource add</code> to add one.</p></div>';
         return;
       }
+      const hasGpuCards = currentGpuStates && Object.values(currentGpuStates).some(s => s !== null);
+      grid.classList.toggle('has-gpu-cards', hasGpuCards);
       grid.innerHTML = state.resources.map(r => {
         const status = r.status;
         const res = r.resource;

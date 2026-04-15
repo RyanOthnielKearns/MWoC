@@ -55,7 +55,6 @@ export interface GpuEntry {
   utilization: number;    // %
   memory_used: number;    // MiB
   memory_total: number;   // MiB
-  temperature: number;    // °C
   free: boolean;
   percent_available: number;
 }

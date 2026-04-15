@@ -218,7 +218,7 @@ program
           console.log(
             chalk.dim(`    GPU ${g.index}  `) +
             utilBar(g.utilization) +
-            chalk.dim(`  ${String(g.utilization).padStart(3)}%  ${memUsed}/${memTotal} GB  ${g.temperature}°C  `) +
+            chalk.dim(`  ${String(g.utilization).padStart(3)}%  ${memUsed}/${memTotal} GB  `) +
             statusStr
           );
         }
@@ -912,14 +912,13 @@ program
 
     console.log(chalk.green(`\n✓ Saved ${resources.length} resource(s) to ${RESOURCES_FILE}`));
     console.log(chalk.dim("Run `mwoc probe` to scan them now.\n"));
-    } catch (err) {
-      if (err instanceof ExitPromptError) {
-        console.log(chalk.dim("\nInit cancelled."));
-        return;
-      }
-      throw err;
+  } catch (err) {
+    if (err instanceof CancelFlowError) {
+      process.exit(0);
     }
-  });
+    throw err;
+  }
+});
 
 // --- mwoc dash ---
 program
@@ -1254,6 +1253,5 @@ program
     }
   });
 
-program.parse();
 
-// Removed duplicated formatAge utility
+program.parse();

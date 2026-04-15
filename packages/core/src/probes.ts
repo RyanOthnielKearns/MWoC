@@ -314,7 +314,11 @@ export async function fetchGpuState(resource: RemoteServer): Promise<GpuState | 
     if (!res.ok) return null;
     const json = (await res.json()) as { result?: string };
     if (!json.result) return null;
-    return JSON.parse(json.result) as GpuState;
+    const raw = JSON.parse(json.result) as { gpus: Array<Record<string, unknown>>; updatedAt: string };
+    return {
+      gpus: raw.gpus.map(({ temperature: _t, ...g }) => g as unknown as import("./types.js").GpuEntry),
+      updatedAt: raw.updatedAt,
+    };
   } catch {
     return null;
   }
